@@ -68,6 +68,14 @@ Da creare UNA volta su un Mac, dalla cartella TRAYDROP:
 Con piu' di due computer: il "peer" e' un solo destinatario; per ora l'app parla
 con una coppia. (Estendibile a una lista di destinatari.)
 
+## Lingua
+- TrayDrop parla italiano, inglese, francese e spagnolo. Di default usa la lingua del sistema
+  (se non e' tra queste: inglese). Per cambiarla: finestra > pannello Collegamento > "Lingua".
+  Finestra, menu e notifiche cambiano subito.
+- Per aggiungere o modificare un testo: scrivilo in italiano con tr("...") (Python) o T('...')
+  (finestra) e aggiungi le traduzioni nel dizionario TRANSLATIONS in fondo a traydrop.py.
+  python tools/check_i18n.py controlla che non manchi nulla (lo fa anche GitHub Actions).
+
 ## Uso
     python traydrop.py gui            # FINESTRA moderna: drag & drop, storico, stato collegamento (consigliata)
     python traydrop.py tk             # finestra semplice tkinter (alternativa)

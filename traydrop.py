@@ -33,6 +33,64 @@ CHUNK = 1024 * 1024
 CLIP_MAX = 50 * 1024 * 1024  # limite per testo/immagine dagli appunti
 
 
+# ------------------------------------------------------------------ lingue
+# Testi in italiano nel codice; traduzioni in TRANSLATIONS (in fondo al file).
+# La lingua si sceglie da sola (lingua del sistema) o dalla finestra (config "lang").
+SUPPORTED_LANGS = ("it", "en", "fr", "es")
+LANG_NAMES = {"it": "Italiano", "en": "English", "fr": "Français", "es": "Español"}
+LANG = "it"
+
+
+def detect_lang():
+    """Lingua preferita del sistema tra quelle supportate (altrimenti inglese)."""
+    cands = []
+    if IS_MAC:
+        try:
+            from Foundation import NSLocale
+            cands += [str(x) for x in NSLocale.preferredLanguages()]
+        except Exception:
+            try:
+                out = subprocess.run(["defaults", "read", "-g", "AppleLanguages"],
+                                     capture_output=True, text=True, timeout=5).stdout
+                cands += [ln.strip().strip(",").strip('"') for ln in out.splitlines()]
+            except Exception:
+                pass
+    if IS_WIN:
+        try:
+            import ctypes, locale as _loc
+            cands.append(_loc.windows_locale.get(ctypes.windll.kernel32.GetUserDefaultUILanguage(), ""))
+        except Exception:
+            pass
+    for var in ("LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"):
+        cands += os.environ.get(var, "").split(":")
+    try:
+        import locale as _loc
+        cands.append(_loc.getlocale()[0] or "")
+    except Exception:
+        pass
+    for c in cands:
+        code = c.replace("_", "-").split("-")[0].split(".")[0].lower()
+        if code in SUPPORTED_LANGS:
+            return code
+    return "en"
+
+
+def set_lang(cfg=None):
+    global LANG
+    want = (cfg or {}).get("lang", "auto")
+    LANG = want if want in SUPPORTED_LANGS else detect_lang()
+    return LANG
+
+
+def tr(text, **kw):
+    """Traduce un testo italiano nella lingua attiva; {nome} viene sostituito con kw."""
+    if LANG != "it":
+        t = TRANSLATIONS.get(text)
+        if t:
+            text = t[SUPPORTED_LANGS.index(LANG) - 1]
+    return text.format(**kw) if kw else text
+
+
 def default_inbox():
     return os.environ.get("TRAYDROP_INBOX") or str(Path.home() / "Downloads" / "TrayDrop")
 
@@ -44,13 +102,14 @@ def load_cfg(allow_missing=False):
         if allow_missing:
             return {"peer": "", "port": DEFAULT_PORT, "token": secrets.token_urlsafe(24),
                     "inbox": default_inbox(), "_new": True}
-        msg = ("TrayDrop non e' ancora configurato. Apri la finestra (python traydrop.py gui) "
-               "oppure: python traydrop.py init --peer <IP-altro-computer>")
+        msg = tr("TrayDrop non è ancora configurato. Apri la finestra (python traydrop.py gui) "
+                 "oppure: python traydrop.py init --peer <IP-altro-computer>")
         if IS_WIN:  # con pythonw / .exe senza console il messaggio non si vedrebbe
-            notify("TrayDrop - errore", msg)
+            notify_err(msg)
         sys.exit(msg)
     cfg = json.loads(CONFIG.read_text())
     cfg.setdefault("port", DEFAULT_PORT)
+    cfg.setdefault("peer", "")
     cfg["inbox"] = os.environ.get("TRAYDROP_INBOX") or cfg.get("inbox") or default_inbox()
     return cfg
 
@@ -58,7 +117,7 @@ def load_cfg(allow_missing=False):
 def save_cfg(cfg):
     """Salva la config in modo atomico, leggibile solo dall'utente."""
     HOME.mkdir(parents=True, exist_ok=True)
-    data = {k: cfg[k] for k in ("peer", "port", "peer_port", "token", "inbox", "ui_port")
+    data = {k: cfg[k] for k in ("peer", "port", "peer_port", "token", "inbox", "ui_port", "lang")
             if cfg.get(k) not in (None, "")}
     tmp = CONFIG.with_name(CONFIG.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=2))
@@ -146,7 +205,11 @@ def py_exe(console=True):
     return str(exe)
 
 
-def notify(title, msg):
+def notify_err(msg):
+    notify(tr("TrayDrop - errore"), msg, error=True)
+
+
+def notify(title, msg, error=False):
     try:
         if IS_MAC:
             esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
@@ -156,7 +219,7 @@ def notify(title, msg):
         elif IS_WIN:
             if _tray is not None:
                 _tray.notify(msg, title)
-            elif "errore" in title.lower():
+            elif error:
                 import ctypes
                 ctypes.windll.user32.MessageBoxW(0, msg, title, 0x10)
             else:
@@ -259,11 +322,14 @@ def png_size(b):
     return None
 
 
-def describe_clip(kind, data):
+def describe_clip(kind, data, short=False):
+    """'Appunti · testo (42 caratteri)'; con short=True solo 'testo (42 caratteri)'."""
     if kind == "text":
-        return f"Appunti · testo ({len(data.decode('utf-8', 'replace'))} caratteri)"
-    wh = png_size(data)
-    return f"Appunti · immagine {wh[0]}×{wh[1]}" if wh else "Appunti · immagine"
+        what = tr("testo ({n} caratteri)", n=len(data.decode("utf-8", "replace")))
+    else:
+        wh = png_size(data)
+        what = tr("immagine {w}×{h}", w=wh[0], h=wh[1]) if wh else tr("immagine")
+    return what if short else tr("Appunti") + " · " + what
 
 
 def _run(cmd, **kw):
@@ -334,7 +400,7 @@ def _mac_write_text(s):
     pb = NSPasteboard.generalPasteboard()
     pb.clearContents()
     if not pb.setString_forType_(s, "public.utf8-plain-text"):
-        raise RuntimeError("scrittura negli appunti rifiutata")
+        raise RuntimeError(tr("scrittura negli appunti rifiutata"))
 
 
 def _mac_write_image(png):
@@ -420,7 +486,7 @@ def _lx_tool():
         return "wl"
     if shutil.which("xclip"):
         return "x"
-    raise RuntimeError("serve wl-clipboard (Wayland) o xclip (X11): sudo apt install wl-clipboard xclip")
+    raise RuntimeError(tr("serve wl-clipboard (Wayland) o xclip (X11): sudo apt install wl-clipboard xclip"))
 
 
 def _lx_get(t, mime=None):
@@ -504,7 +570,7 @@ def on_clip_received(cfg, kind, data):
     saved, err = None, ""
     if kind == "image":
         inbox.mkdir(parents=True, exist_ok=True)
-        saved = unique_path(inbox, f"Appunti {stamp}.png")
+        saved = unique_path(inbox, f"{tr('Appunti')} {stamp}.png")
         saved.write_bytes(data)
     try:
         if kind == "text":
@@ -517,14 +583,16 @@ def on_clip_received(cfg, kind, data):
         err = str(e)
         if kind == "text":
             inbox.mkdir(parents=True, exist_ok=True)
-            saved = unique_path(inbox, f"Appunti {stamp}.txt")
+            saved = unique_path(inbox, f"{tr('Appunti')} {stamp}.txt")
             saved.write_bytes(data)
     if err:
-        ui_event("in", label, len(data), "error", f"appunti non aggiornati ({err}); salvato in {saved.name}")
-        notify("TrayDrop - errore", f"{label}: appunti non aggiornati, salvato in {saved.name}")
+        ui_event("in", label, len(data), "error",
+                 tr("appunti non aggiornati ({err}); salvato in {file}", err=err, file=saved.name))
+        notify_err(tr("{what}: appunti non aggiornati, salvato in {file}", what=label, file=saved.name))
     else:
         ui_event("in", label, len(data))
-        notify("TrayDrop", f"Ricevuto {label[10:]} — è negli appunti, incolla con {PASTE_KEY}")
+        notify("TrayDrop", tr("Ricevuto {what}: è negli appunti, incolla con {key}",
+                              what=describe_clip(kind, data, short=True), key=PASTE_KEY))
 
 
 # ---------------------------------------------------------------- ricevitore
@@ -582,12 +650,12 @@ class Handler(BaseHTTPRequestHandler):
             while left > 0:
                 b = self.rfile.read(min(CHUNK, left))
                 if not b:
-                    raise ConnectionError("trasferimento interrotto")
+                    raise ConnectionError(tr("trasferimento interrotto"))
                 buf += b; left -= len(b)
                 tr_set(tid, done=size - left, frac=(size - left) / size)
             data = bytes(buf)
             if hashlib.sha256(data).hexdigest() != sha:
-                raise ValueError("checksum errato")
+                raise ValueError(tr("checksum errato"))
         except Exception as e:
             return self._reply(400, str(e))
         finally:
@@ -596,7 +664,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             on_clip_received(self.server.cfg, kind, data)
         except Exception as e:
-            ui_event("in", "Appunti", size, "error", str(e))
+            ui_event("in", tr("Appunti"), size, "error", str(e))
 
     def do_PUT(self):
         if self.path == "/clip":
@@ -619,11 +687,11 @@ class Handler(BaseHTTPRequestHandler):
                 while left > 0:
                     buf = self.rfile.read(min(CHUNK, left))
                     if not buf:
-                        raise ConnectionError("trasferimento interrotto")
+                        raise ConnectionError(tr("trasferimento interrotto"))
                     f.write(buf); h.update(buf); left -= len(buf)
                     tr_set(tid, done=size - left, frac=(size - left) / size if size else 1.0)
             if h.hexdigest() != sha:
-                raise ValueError("checksum errato")
+                raise ValueError(tr("checksum errato"))
             dest = unique_path(inbox, safe_name(name))
             os.replace(tmp, dest)
         except Exception as e:
@@ -643,7 +711,7 @@ def _default_recv(p):
         ui_event("in", p.name, p.stat().st_size)
     except OSError:
         ui_event("in", p.name)
-    notify("TrayDrop", f"Ricevuto: {p.name}")
+    notify("TrayDrop", tr("Ricevuto: {name}", name=p.name))
 
 
 def _bind_receiver(cfg, port, on_receive):
@@ -657,8 +725,9 @@ def start_server(cfg, on_receive=None):
     try:
         srv = _bind_receiver(cfg, cfg["port"], on_receive or _default_recv)
     except OSError as e:
-        sys.exit(f"Impossibile ascoltare sulla porta {cfg['port']}: {e}\n"
-                 "Forse TrayDrop e' gia' in esecuzione (chiudilo) o la porta e' occupata.")
+        sys.exit(tr("Impossibile ascoltare sulla porta {port}: {err}\n"
+                    "Forse TrayDrop è già in esecuzione (chiudilo) o la porta è occupata.",
+                    port=cfg["port"], err=e))
     RECV["srv"] = srv
     start_discovery_responder(cfg)
     return srv
@@ -798,7 +867,7 @@ NOT_CONFIGURED = "destinatario non configurato: apri la finestra TrayDrop > Coll
 
 def _conn(cfg, timeout=30):
     if not cfg.get("peer"):
-        raise RuntimeError(NOT_CONFIGURED)
+        raise RuntimeError(tr(NOT_CONFIGURED))
     return http.client.HTTPConnection(cfg["peer"], int(cfg.get("peer_port", cfg["port"])), timeout=timeout)
 
 
@@ -816,21 +885,21 @@ def ping(cfg, timeout=10):
 def explain_ping(ok, info):
     """Traduce l'esito del test di connessione in un consiglio comprensibile."""
     if ok:
-        return "Collegato ✓"
+        return tr("Collegato ✓")
     i = (info or "").lower()
-    if NOT_CONFIGURED.lower() in i:
-        return "Non configurato: inserisci l'altro computer."
+    if NOT_CONFIGURED.lower() in i or tr(NOT_CONFIGURED).lower() in i:
+        return tr("Non configurato: inserisci l'altro computer.")
     if "403" in i:
-        return "L'altro computer risponde, ma il token è diverso: usa lo stesso token su entrambi."
+        return tr("L'altro computer risponde, ma il token è diverso: usa lo stesso token su entrambi.")
     if "refused" in i or "10061" in i:
-        return "A quell'indirizzo non c'è TrayDrop in ascolto: è acceso sull'altro computer? La porta è la stessa?"
+        return tr("A quell'indirizzo non c'è TrayDrop in ascolto: è acceso sull'altro computer? La porta è la stessa?")
     if "timed out" in i or "timeout" in i or "10060" in i:
-        return "L'altro computer non risponde: controlla l'IP, il firewall o Netskope."
+        return tr("L'altro computer non risponde: controlla l'IP, il firewall o la VPN.")
     if "getaddrinfo" in i or "name or service" in i or "nodename" in i or "11001" in i:
-        return "Indirizzo non trovato: controlla l'IP o il nome."
+        return tr("Indirizzo non trovato: controlla l'IP o il nome.")
     if "unreachable" in i or "no route" in i or "10065" in i or "10051" in i:
-        return "Rete non raggiungibile: i due computer sono sulla stessa rete?"
-    return f"Non raggiungibile ({info})"
+        return tr("Rete non raggiungibile: i due computer sono sulla stessa rete?")
+    return tr("Non raggiungibile ({info})", info=info)
 
 
 def send_file(cfg, path, progress=None):
@@ -907,9 +976,9 @@ def send_many(cfg, paths, quiet=False, tid=None, base=0.0, span=1.0):
                 tr_end(t)
     if not quiet:
         if errs:
-            notify("TrayDrop - errore", "; ".join(errs)[:200])
+            notify_err("; ".join(errs)[:200])
         elif ok:
-            notify("TrayDrop", f"Inviati {ok} elemento/i")
+            notify("TrayDrop", tr("Inviati: {n}", n=ok))
     return ok, errs
 
 
@@ -936,36 +1005,36 @@ def send_clip(cfg, kind, data, progress=None):
         r = c.getresponse()
         body = r.read().decode("utf-8", "replace")
     except (BrokenPipeError, ConnectionResetError):
-        raise RuntimeError(f"connessione chiusa dall'altro computer ({OLD_PEER_HINT})")
+        raise RuntimeError(tr("connessione chiusa dall'altro computer ({hint})", hint=tr(OLD_PEER_HINT)))
     if r.status == 403:
-        raise RuntimeError(f"rifiutato ({OLD_PEER_HINT})")
+        raise RuntimeError(tr("rifiutato ({hint})", hint=tr(OLD_PEER_HINT)))
     if r.status != 201:
         raise RuntimeError(f"{r.status} {body}")
 
 
 def send_clipboard(cfg, quiet=False):
     """Invia il contenuto degli appunti. Ritorna (ok, messaggio)."""
-    def fail(msg, label="Appunti"):
-        ui_event("out", label, 0, "error", msg)
+    def fail(msg, label=None):
+        ui_event("out", label or tr("Appunti"), 0, "error", msg)
         if not quiet:
-            notify("TrayDrop - errore", msg[:200])
+            notify_err(msg[:200])
         return False, msg
     try:
         kind, val = clip_read()
     except Exception as e:
-        return fail(f"impossibile leggere gli appunti: {e}")
+        return fail(tr("impossibile leggere gli appunti: {err}", err=e))
     if kind is None:
-        msg = "gli appunti sono vuoti (o il formato non è supportato)"
+        msg = tr("gli appunti sono vuoti (o il formato non è supportato)")
         if not quiet:
             notify("TrayDrop", msg[0].upper() + msg[1:])
         return False, msg
     if kind == "files":
         ok, errs = send_many(cfg, val, quiet=quiet)
-        return (not errs), (f"inviati {ok} file dagli appunti" if not errs else "; ".join(errs))
+        return (not errs), (tr("inviati {n} file dagli appunti", n=ok) if not errs else "; ".join(errs))
     data = val.encode("utf-8") if kind == "text" else val
     label = describe_clip(kind, data)
     if len(data) > CLIP_MAX:
-        return fail(f"troppo grande ({len(data) // 2**20} MB): salvalo come file e invialo", label)
+        return fail(tr("troppo grande ({mb} MB): salvalo come file e invialo", mb=len(data) // 2**20), label)
     tid = tr_start("out", label, len(data), 0.0, 1.0, "Invio")
     try:
         send_clip(cfg, kind, data,
@@ -976,7 +1045,7 @@ def send_clipboard(cfg, quiet=False):
         tr_end(tid)
     ui_event("out", label, len(data))
     if not quiet:
-        notify("TrayDrop", f"Inviato: {label}")
+        notify("TrayDrop", tr("Inviato: {what}", what=label))
     return True, label
 
 
@@ -1016,7 +1085,7 @@ def pick_cmd(folder=False):
         from tkinter import filedialog
         root = tk.Tk()
     except Exception as e:
-        sys.exit(f"Selettore file non disponibile (serve tkinter e uno schermo): {e}")
+        sys.exit(tr("Selettore file non disponibile (serve tkinter e uno schermo): {err}", err=e))
     root.withdraw()
     try:
         root.attributes("-topmost", True)
@@ -1035,19 +1104,19 @@ def pick_paths(folder=False):
     kw = {"creationflags": 0x08000000} if IS_WIN else {}  # CREATE_NO_WINDOW
     r = subprocess.run(cmd, capture_output=True, text=True, **kw)
     if r.returncode and r.stderr.strip():
-        notify("TrayDrop - errore", r.stderr.strip()[-200:])
+        notify_err(r.stderr.strip()[-200:])
     return [l for l in r.stdout.splitlines() if l.strip()]
 
 
 def _ping_notify(cfg):
     ok, info = ping(cfg)
-    notify("TrayDrop", "Connessione OK" if ok else explain_ping(ok, info))
+    notify("TrayDrop", tr("Connessione OK") if ok else explain_ping(ok, info))
 
 
 def peer_label(cfg):
     if not is_configured(cfg):
-        return "Destinatario: da configurare…"
-    return f"Destinatario: {cfg['peer']}:{cfg.get('peer_port', cfg['port'])}"
+        return tr("Destinatario: da configurare…")
+    return tr("Destinatario: {addr}", addr=f"{cfg['peer']}:{cfg.get('peer_port', cfg['port'])}")
 
 
 def open_setup_if_needed(cfg, ui_url):
@@ -1061,8 +1130,8 @@ def run_menubar(cfg):
     try:
         import rumps
     except ImportError:
-        sys.exit("Manca 'rumps'. Installa con:  pip3 install rumps\n"
-                 "Oppure usa la finestra:        python3 traydrop.py gui")
+        sys.exit(tr("Manca 'rumps'. Installa con:  pip install rumps\n"
+                    "Oppure usa la finestra:        python traydrop.py gui"))
     try:  # nessuna icona nel Dock
         from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
         NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
@@ -1070,31 +1139,38 @@ def run_menubar(cfg):
         pass
     _ui_srv, ui_url = start_ui_server(cfg)
     if _ui_srv is None:  # TrayDrop e' gia' acceso: apri la sua finestra e basta
-        print("TrayDrop e' gia' in esecuzione: apro la finestra.")
+        print(tr("TrayDrop è già in esecuzione: apro la finestra."))
         return open_window(ui_url)
     start_server(cfg)
     open_setup_if_needed(cfg, ui_url)
-    print(f"TrayDrop attivo: ascolto sulla porta {cfg['port']}, {peer_label(cfg).lower()}.\n"
-          "Cerca l'icona ⇄ nella barra dei menu in alto a destra.\n"
-          "Non la vedi? (notch / barra piena) -> Impostazioni > Barra dei menu > consenti 'Python',\n"
-          "oppure chiudi e usa la finestra:  python traydrop.py gui")
+    print(tr("TrayDrop attivo: ascolto sulla porta {port}, {dest}.\n"
+             "Cerca l'icona ⇄ nella barra dei menu in alto a destra.\n"
+             "Non la vedi? (notch / barra piena) -> Impostazioni > Barra dei menu > consenti 'Python',\n"
+             "oppure chiudi e usa la finestra:  python traydrop.py gui",
+             port=cfg["port"], dest=peer_label(cfg).lower()))
 
     class App(rumps.App):
         def __init__(self):
-            super().__init__("TrayDrop", title="⇄", quit_button="Esci")
+            super().__init__("TrayDrop", title="⇄", quit_button=tr("Esci"))
+            self._items = []  # (voce, testo italiano) per aggiornare la lingua al volo
+
+            def item(text, cb=None):
+                it = rumps.MenuItem(tr(text), callback=cb)
+                self._items.append((it, text))
+                return it
             self.peer_item = rumps.MenuItem(peer_label(cfg))
-            self.login_item = rumps.MenuItem("Avvia all'accesso", callback=self.toggle_login)
+            self.login_item = item("Avvia all'accesso", self.toggle_login)
             self.login_item.state = MAC_AGENT.exists()
             self.menu = [
-                rumps.MenuItem("Apri finestra TrayDrop", callback=lambda _: open_window(ui_url)),
-                rumps.MenuItem("Invia appunti (testo / immagine)", callback=self.clip),
-                rumps.MenuItem("Invia selezione del Finder", callback=self.finder),
-                rumps.MenuItem("Scegli file da inviare…", callback=self.choose),
-                rumps.MenuItem("Scegli cartella da inviare…", callback=self.choose_dir),
+                item("Apri finestra TrayDrop", lambda _: open_window(ui_url)),
+                item("Invia appunti (testo / immagine)", self.clip),
+                item("Invia selezione del Finder", self.finder),
+                item("Scegli file da inviare…", self.choose),
+                item("Scegli cartella da inviare…", self.choose_dir),
                 None,
-                rumps.MenuItem("Apri cartella ricevuti", callback=lambda _: open_folder(cfg["inbox"])),
-                rumps.MenuItem("Test connessione", callback=lambda _: _ping_notify(cfg)),
-                rumps.MenuItem("Collegamento…", callback=lambda _: open_window(ui_url + "#setup")),
+                item("Apri cartella ricevuti", lambda _: open_folder(cfg["inbox"])),
+                item("Test connessione", lambda _: _ping_notify(cfg)),
+                item("Collegamento…", lambda _: open_window(ui_url + "#setup")),
                 self.login_item,
                 self.peer_item,
                 None,
@@ -1104,22 +1180,29 @@ def run_menubar(cfg):
 
         def refresh(self, _):
             self.peer_item.title = peer_label(cfg)
+            for it, text in self._items:
+                if it.title != tr(text):
+                    it.title = tr(text)
+            try:
+                self.quit_button.title = tr("Esci")
+            except Exception:
+                pass
 
         def toggle_login(self, item):
             try:
                 if MAC_AGENT.exists():
                     uninstall_login_mac()
-                    notify("TrayDrop", "Non partirà più all'accesso")
+                    notify("TrayDrop", tr("Non partirà più all'accesso"))
                 else:
                     install_login(load_now=False)
-                    notify("TrayDrop", "Partirà da solo a ogni accesso")
+                    notify("TrayDrop", tr("Partirà da solo a ogni accesso"))
             except OSError as e:
-                notify("TrayDrop - errore", f"Avvio automatico: {e}")
+                notify_err(tr("Avvio automatico: {err}", err=e))
             item.state = MAC_AGENT.exists()
 
         def _send(self, paths):
             if not paths:
-                notify("TrayDrop", "Nessun file selezionato")
+                notify("TrayDrop", tr("Nessun file selezionato"))
                 return
             def job():
                 self.title = "⇡"
@@ -1154,7 +1237,7 @@ def run_tray(cfg):
     from PIL import Image, ImageDraw
     _ui_srv, ui_url = start_ui_server(cfg)
     if _ui_srv is None:  # TrayDrop e' gia' acceso: apri la sua finestra e basta
-        print("TrayDrop e' gia' in esecuzione: apro la finestra.")
+        print(tr("TrayDrop è già in esecuzione: apro la finestra."))
         return open_window(ui_url)
     start_server(cfg)
     open_setup_if_needed(cfg, ui_url)
@@ -1173,16 +1256,17 @@ def run_tray(cfg):
         threading.Thread(target=job, daemon=True).start()
 
     menu = pystray.Menu(
-        pystray.MenuItem("Apri finestra TrayDrop", lambda: open_window(ui_url), default=True),
-        pystray.MenuItem("Invia appunti (testo / immagine)",
+        pystray.MenuItem(lambda item: tr("Apri finestra TrayDrop"), lambda: open_window(ui_url), default=True),
+        pystray.MenuItem(lambda item: tr("Invia appunti (testo / immagine)"),
                          lambda: threading.Thread(target=send_clipboard, args=(cfg,), daemon=True).start()),
-        pystray.MenuItem("Scegli file da inviare…", lambda: send_async(False)),
-        pystray.MenuItem("Scegli cartella da inviare…", lambda: send_async(True)),
-        pystray.MenuItem("Apri cartella ricevuti", lambda: open_folder(cfg["inbox"])),
-        pystray.MenuItem("Test connessione", lambda: threading.Thread(target=_ping_notify, args=(cfg,), daemon=True).start()),
-        pystray.MenuItem("Collegamento…", lambda: open_window(ui_url + "#setup")),
+        pystray.MenuItem(lambda item: tr("Scegli file da inviare…"), lambda: send_async(False)),
+        pystray.MenuItem(lambda item: tr("Scegli cartella da inviare…"), lambda: send_async(True)),
+        pystray.MenuItem(lambda item: tr("Apri cartella ricevuti"), lambda: open_folder(cfg["inbox"])),
+        pystray.MenuItem(lambda item: tr("Test connessione"),
+                         lambda: threading.Thread(target=_ping_notify, args=(cfg,), daemon=True).start()),
+        pystray.MenuItem(lambda item: tr("Collegamento…"), lambda: open_window(ui_url + "#setup")),
         pystray.MenuItem(lambda item: peer_label(cfg), None, enabled=False),
-        pystray.MenuItem("Esci", lambda icon: icon.stop()),
+        pystray.MenuItem(lambda item: tr("Esci"), lambda icon: icon.stop()),
     )
     _tray = pystray.Icon("traydrop", img, "TrayDrop", menu)
     _tray.run()
@@ -1195,8 +1279,8 @@ def run_tk(cfg):
         import tkinter as tk
         from tkinter import filedialog
     except ImportError:
-        sys.exit("tkinter non disponibile. macOS/Windows: reinstalla Python da python.org; "
-                 "Linux: sudo apt install python3-tk")
+        sys.exit(tr("tkinter non disponibile. macOS/Windows: reinstalla Python da python.org; "
+                    "Linux: sudo apt install python3-tk"))
     dnd = False
     try:
         from tkinterdnd2 import TkinterDnD, DND_FILES
@@ -1209,7 +1293,7 @@ def run_tk(cfg):
         root.attributes("-topmost", True)
     except Exception:
         pass
-    status = tk.StringVar(value=f"Pronto  ->  {cfg['peer']}:{cfg['port']}")
+    status = tk.StringVar(value=tr("Pronto  ->  {addr}", addr=f"{cfg['peer']}:{cfg['port']}"))
 
     def set_status(s):
         root.after(0, lambda: status.set(s))
@@ -1219,32 +1303,32 @@ def run_tk(cfg):
         if not paths:
             return
         def job():
-            set_status(f"Invio di {len(paths)} elemento/i…")
+            set_status(tr("Invio in corso: {n}…", n=len(paths)))
             ok, errs = send_many(cfg, paths)
-            set_status("Inviato ✓" if not errs else "Errore: " + errs[0][:80])
+            set_status(tr("Inviato ✓") if not errs else tr("Errore: {err}", err=errs[0][:80]))
         threading.Thread(target=job, daemon=True).start()
 
     def on_receive(p):
-        notify("TrayDrop", f"Ricevuto: {p.name}")
-        set_status(f"Ricevuto: {p.name}")
+        notify("TrayDrop", tr("Ricevuto: {name}", name=p.name))
+        set_status(tr("Ricevuto: {name}", name=p.name))
 
     start_server(cfg, on_receive=on_receive)
 
     zone = tk.Label(root, relief="groove", borderwidth=2, height=5,
-                    text="Trascina qui i file da inviare" if dnd else
-                    "Per il drag & drop:  pip3 install tkinterdnd2")
+                    text=tr("Trascina qui i file da inviare") if dnd else
+                    tr("Per il drag & drop:  pip install tkinterdnd2"))
     zone.pack(fill="x", padx=12, pady=(12, 6))
     if dnd:
         zone.drop_target_register(DND_FILES)
         zone.dnd_bind("<<Drop>>", lambda e: do_send(list(root.tk.splitlist(e.data))))
 
     def b(text, cmd):
-        tk.Button(root, text=text, command=cmd).pack(fill="x", padx=12, pady=2)
+        tk.Button(root, text=tr(text), command=cmd).pack(fill="x", padx=12, pady=2)
     def clip():
         def job():
-            set_status("Invio appunti…")
+            set_status(tr("Invio appunti…"))
             ok, msg = send_clipboard(cfg, quiet=True)
-            set_status(("Inviato ✓ " if ok else "Errore: ") + msg[:80])
+            set_status((tr("Inviato ✓") + " " + msg[:80]) if ok else tr("Errore: {err}", err=msg[:80]))
         threading.Thread(target=job, daemon=True).start()
     b("Invia appunti (testo / immagine)", clip)
     b("Invia file…", lambda: do_send(list(filedialog.askopenfilenames(parent=root))))
@@ -1252,7 +1336,7 @@ def run_tk(cfg):
     b("Apri cartella ricevuti", lambda: open_folder(cfg["inbox"]))
     def test():
         ok, info = ping(cfg)
-        set_status("Connessione OK ✓" if ok else f"Non raggiungibile ({info})")
+        set_status(tr("Connessione OK ✓") if ok else explain_ping(ok, info))
     b("Test connessione", lambda: threading.Thread(target=test, daemon=True).start())
     tk.Label(root, textvariable=status, wraplength=330, fg="#444").pack(pady=8)
     root.mainloop()
@@ -1267,6 +1351,7 @@ UI_HTML = r"""<!doctype html>
 :root{--bg:#f4f5f8;--card:#fff;--fg:#14171f;--mut:#6b7280;--line:#e4e7ec;--acc:#2563eb;--ok:#16a34a;--bad:#dc2626}
 @media (prefers-color-scheme:dark){:root{--bg:#0e1014;--card:#171a21;--fg:#e8eaf0;--mut:#8b93a3;--line:#262b36;--acc:#4c8dff;--ok:#2fd16b;--bad:#ff6b6b}}
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased}
 .wrap{max-width:520px;margin:0 auto;padding:22px 16px 40px}
 header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
@@ -1368,6 +1453,7 @@ summary{cursor:pointer;color:var(--mut);font-size:13px;margin-bottom:10px}
 .smsg.wait{background:var(--bg);color:var(--mut)}
 .pill{cursor:pointer}
 .sbox .row{margin:0}
+select{font:inherit;font-size:14px;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:4px 8px}
 .badge{font-size:12px;padding:3px 9px;border-radius:99px;background:color-mix(in srgb,var(--ok) 15%,transparent);color:var(--ok);font-weight:600}
 .badge.warn{background:color-mix(in srgb,var(--bad) 13%,transparent);color:var(--bad)}
 .net-ic{font-size:15px}
@@ -1399,6 +1485,9 @@ summary{cursor:pointer;color:var(--mut);font-size:13px;margin-bottom:10px}
 <div class="kvr"><span>Destinatario</span><b id="to" class="mono">…</b></div>
 <div class="kvr"><span>Token</span><b id="tok" class="mono brk">••••••••••</b><div class="mini" id="tokMini"><a id="tokShow">Mostra con impronta</a> · <a id="tokCopy">Copia</a></div></div>
 <div class="kvr"><span>Ricevuti in</span><b id="inboxp" class="mono"></b></div>
+<div class="kvr"><span>Lingua</span><b><select id="lang">
+  <option value="auto">Automatica</option><option value="it">Italiano</option><option value="en">English</option>
+  <option value="fr">Français</option><option value="es">Español</option></select></b></div>
 </div>
 </div><div id="toast"></div>
 <div id="setup"><div class="box sbox">
@@ -1426,22 +1515,29 @@ summary{cursor:pointer;color:var(--mut);font-size:13px;margin-bottom:10px}
 <div id="modal"><div class="box"><h3>Spegnere TrayDrop?</h3><p id="mTxt"></p>
 <div class="row"><button id="mNo">Annulla</button><button id="mYes" class="danger">Spegni</button></div></div></div>
 <script>
+const I18N=/*I18N*/{}, LANG=/*LANG*/'it';
+function T(s,v){let r=I18N[s]||s;if(v)for(const k in v)r=r.split('{'+k+'}').join(v[k]);return r}
+(function i18nDom(){document.documentElement.lang=LANG;
+  const w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);let n;
+  while((n=w.nextNode())){const t=n.nodeValue.trim();if(t&&I18N[t])n.nodeValue=n.nodeValue.replace(t,I18N[t])}
+  document.querySelectorAll('[placeholder],[title]').forEach(e=>{for(const a of ['placeholder','title']){const v=e.getAttribute(a);if(v&&I18N[v])e.setAttribute(a,I18N[v])}})})();
 const K=new URLSearchParams(location.search).get('k')||'';
 const $=s=>document.querySelector(s);
 const q=p=>p+'?k='+encodeURIComponent(K);
 let last={events:[],active:[],peer:'',online:null},dead=false,tok='',tokV=false;
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function fmt(n){if(!n)return'';const u=['B','KB','MB','GB'];let i=0;while(n>=1024&&i<3){n/=1024;i++}return n.toFixed(i?1:0)+' '+u[i]}
-function ago(t){const s=Math.max(0,Date.now()/1000-t);if(s<10)return'adesso';if(s<60)return Math.floor(s)+' s fa';if(s<3600)return Math.floor(s/60)+' min fa';if(s<86400)return Math.floor(s/3600)+' h fa';return new Date(t*1000).toLocaleDateString()}
+function ago(t){const s=Math.max(0,Date.now()/1000-t);if(s<10)return T('adesso');if(s<60)return T('{n} s fa',{n:Math.floor(s)});if(s<3600)return T('{n} min fa',{n:Math.floor(s/60)});if(s<86400)return T('{n} h fa',{n:Math.floor(s/3600)});return new Date(t*1000).toLocaleDateString(LANG)}
 function toast(m){const t=$('#toast');t.textContent=m;t.className='show';clearTimeout(toast.h);toast.h=setTimeout(()=>t.className='',2600)}
 function render(){
   const s=last;
-  if(!s.configured){$('#peer').className='pill off';$('#peerTxt').textContent='Da configurare';$('#peer').title='Clicca per collegare l’altro computer'}
+  if(!s.configured){$('#peer').className='pill off';$('#peerTxt').textContent=T('Da configurare');$('#peer').title=T('Clicca per collegare l’altro computer')}
   else{$('#peer').className='pill '+(s.online===null?'':(s.online?'on':'off'));
-    $('#peerTxt').textContent=s.online===null?'Verifica…':(s.online?'Collegato a '+s.peer:'Non raggiungibile · '+s.peer);
+    $('#peerTxt').textContent=s.online===null?T('Verifica…'):(s.online?T('Collegato a {peer}',{peer:s.peer}):T('Non raggiungibile · {peer}',{peer:s.peer}));
     $('#peer').title=s.online?'':(s.hint||'')}
-  $('#me').textContent=(s.host?s.host+' · ':'')+(s.ip||'?')+' · porta '+(s.port||'');
-  $('#to').textContent=s.configured?s.peer:'— non configurato —';
+  $('#me').textContent=(s.host?s.host+' · ':'')+(s.ip||'?')+' · '+T('porta {n}',{n:s.port||''});
+  $('#to').textContent=s.configured?s.peer:T('— non configurato —');
+  if(document.activeElement!==$('#lang'))$('#lang').value=s.lang_setting||'auto';
   $('#tokMini').style.display=s.can_reveal?'':'none';
   renderNet(s);
   if(!s.configured&&!setupShown&&!dead)openSetup(true);
@@ -1449,31 +1545,31 @@ function render(){
   let h='';
   for(const a of s.active||[]){
     const pct=Math.round((a.frac||0)*100), ind=(a.total===0&&a.phase!=='Preparazione');
-    const det=[a.phase,(a.total&&a.done)?fmt(a.done)+' / '+fmt(a.total):'',a.speed>0?fmt(a.speed)+'/s':''].filter(Boolean).join(' · ');
+    const det=[T(a.phase),(a.total&&a.done)?fmt(a.done)+' / '+fmt(a.total):'',a.speed>0?fmt(a.speed)+'/s':''].filter(Boolean).join(' · ');
     h+=`<div class="it ${a.dir==='in'?'in':''}"><div class="ic">${a.dir==='in'?'↓':'↑'}</div><div class="nm"><b>${esc(a.name)}</b><small>${esc(det)}</small><div class="bar ${ind?'ind':''}"><i style="width:${pct}%"></i></div></div><div class="pc">${ind?'…':pct+'%'}</div></div>`;
   }
   for(const e of s.events){
     const cls=e.status==='ok'?e.kind:'err', ic=e.status!=='ok'?'!':(e.kind==='in'?'↓':'↑');
-    const sub=e.status!=='ok'?esc(e.err||'errore'):(e.kind==='in'?'Ricevuto':'Inviato')+(e.size?' · '+fmt(e.size):'')+' · '+ago(e.t);
+    const sub=e.status!=='ok'?esc(e.err||T('errore')):(e.kind==='in'?T('Ricevuto'):T('Inviato'))+(e.size?' · '+fmt(e.size):'')+' · '+ago(e.t);
     h+=`<div class="it ${cls}"><div class="ic">${ic}</div><div class="nm"><b>${esc(e.name)}</b><small>${sub}</small></div></div>`;
   }
-  $('#list').innerHTML=h||'<div class="empty">Ancora nulla</div>';
+  $('#list').innerHTML=h||'<div class="empty">'+T('Ancora nulla')+'</div>';
   const cl=s.clips||[];
   $('#clipsBox').style.display=cl.length?'':'none';
   const ck=cl.map(c=>c.id+':'+c.t).join(',');
   if(ck!==render.ck){render.ck=ck;
-    $('#clips').innerHTML=cl.map(c=>`<div class="kvr cl"><div class="nm"><div class="pv">${esc(c.preview)}</div><small style="color:var(--mut)">${c.n} caratteri · ${ago(c.t)}</small></div><div class="mini"><a data-c="${c.id}">Copia</a></div></div>`).join('')}
+    $('#clips').innerHTML=cl.map(c=>`<div class="kvr cl"><div class="nm"><div class="pv">${esc(c.preview)}</div><small style="color:var(--mut)">${T('{n} caratteri',{n:c.n})} · ${ago(c.t)}</small></div><div class="mini"><a data-c="${c.id}">${T('Copia')}</a></div></div>`).join('')}
 }
 $('#clips').addEventListener('click',async e=>{const id=e.target.dataset&&e.target.dataset.c;if(!id)return;
-  const r=await fetch(q('/api/clip_copy')+'&i='+id,{method:'POST'});toast(r.ok?'Copiato negli appunti':'Errore nella copia')});
+  const r=await fetch(q('/api/clip_copy')+'&i='+id,{method:'POST'});toast(r.ok?T('Copiato negli appunti'):T('Errore nella copia'))});
 $('#bClip').onclick=async()=>{const b=$('#bClip');b.disabled=true;
-  try{const r=await fetch(q('/api/send_clip'),{method:'POST'});const j=await r.json();toast(j.ok?'Inviato: '+j.msg.replace(/^Appunti · /,''):'Errore: '+j.msg)}
-  catch(e){toast('Errore di rete')}finally{b.disabled=false;load()}};
+  try{const r=await fetch(q('/api/send_clip'),{method:'POST'});const j=await r.json();toast(j.ok?T('Inviato: {what}',{what:j.msg}):T('Errore: {err}',{err:j.msg}))}
+  catch(e){toast(T('Errore di rete'))}finally{b.disabled=false;load()}};
 async function load(){if(dead)return;try{const r=await fetch(q('/api/state'));last=await r.json();render()}catch(e){}}
 function sendFile(f){return new Promise(res=>{
   const x=new XMLHttpRequest();x.open('POST',q('/api/send'));
   x.setRequestHeader('X-Name',encodeURIComponent(f.name));
-  x.onloadend=()=>{if(x.status!==200)toast('Errore: '+f.name);load();res()};
+  x.onloadend=()=>{if(x.status!==200)toast(T('Errore: {err}',{err:f.name}));load();res()};
   x.send(f);load()})}
 async function sendAll(files){for(const f of files)await sendFile(f)}
 const drop=$('#drop');
@@ -1484,56 +1580,57 @@ $('#file').onchange=e=>{sendAll([...e.target.files]);e.target.value=''};
 window.addEventListener('drop',e=>{
   const files=[];let dirs=0;
   for(const it of e.dataTransfer.items||[]){const en=it.webkitGetAsEntry&&it.webkitGetAsEntry();if(en&&en.isDirectory){dirs++;continue}const f=it.getAsFile();if(f)files.push(f)}
-  if(dirs)toast('Per le cartelle usa “Scegli cartella…”');
+  if(dirs)toast(T('Per le cartelle usa “Scegli cartella…”'));
   if(files.length)sendAll(files)
 });
-$('#bDir').onclick=async()=>{toast('Scegli la cartella…');await fetch(q('/api/pick_dir'),{method:'POST'});load()};
+$('#bDir').onclick=async()=>{toast(T('Scegli la cartella…'));await fetch(q('/api/pick_dir'),{method:'POST'});load()};
 $('#bOpen').onclick=()=>fetch(q('/api/open_inbox'));
 (function loop(){load().then(()=>{if(!dead)setTimeout(loop,(last.active&&last.active.length)?300:1500)})})();
 let tokTimer=null,tokBusy=false;
-function hideTok(){clearInterval(tokTimer);tokTimer=null;tok='';tokV=false;$('#tok').textContent='••••••••••';$('#tokShow').textContent='Mostra con impronta'}
+function hideTok(){clearInterval(tokTimer);tokTimer=null;tok='';tokV=false;$('#tok').textContent='••••••••••';$('#tokShow').textContent=T('Mostra con impronta')}
 $('#tokShow').onclick=async()=>{
   if(tokV){hideTok();return}
-  if(tokBusy)return;tokBusy=true;toast('Appoggia il dito sul sensore Touch ID…');
+  if(tokBusy)return;tokBusy=true;toast(T('Appoggia il dito sul sensore Touch ID…'));
   try{
     const r=await fetch(q('/api/reveal_token'),{method:'POST'});const j=await r.json();
-    if(!r.ok){toast(j.error||'Autenticazione non riuscita');return}
+    if(!r.ok){toast(j.error||T('Autenticazione non riuscita'));return}
     tok=j.token;tokV=true;$('#tok').textContent=tok;
-    let left=j.seconds||20;const upd=()=>{$('#tokShow').textContent='Nascondi ('+left+')'};upd();
+    let left=j.seconds||20;const upd=()=>{$('#tokShow').textContent=T('Nascondi ({n})',{n:left})};upd();
     tokTimer=setInterval(()=>{left--;if(left<=0)hideTok();else upd()},1000);
-  }catch(e){toast('Errore di rete')}finally{tokBusy=false}
+  }catch(e){toast(T('Errore di rete'))}finally{tokBusy=false}
 };
 $('#tokCopy').onclick=async()=>{
-  if(!tokV||!tok){toast('Prima mostra il token con l’impronta');return}
+  if(!tokV||!tok){toast(T('Prima mostra il token con l’impronta'));return}
   try{await navigator.clipboard.writeText(tok)}catch(e){const i=document.createElement('textarea');i.value=tok;document.body.appendChild(i);i.select();document.execCommand('copy');i.remove()}
-  toast('Token copiato')};
+  toast(T('Token copiato'))};
 document.addEventListener('visibilitychange',()=>{if(document.hidden)hideTok()});
-$('#bOff').onclick=()=>{const n=(last.active||[]).length;$('#mTxt').textContent=n?'Ci sono trasferimenti in corso: verranno interrotti.':'Non riceverai file finché non lo riavvii.';$('#modal').className='show'};
+$('#bOff').onclick=()=>{const n=(last.active||[]).length;$('#mTxt').textContent=n?T('Ci sono trasferimenti in corso: verranno interrotti.'):T('Non riceverai file finché non lo riavvii.');$('#modal').className='show'};
 $('#mNo').onclick=()=>$('#modal').className='';
 $('#mYes').onclick=async()=>{$('#modal').className='';dead=true;try{await fetch(q('/api/quit'),{method:'POST'})}catch(e){}
-  document.querySelector('.wrap').innerHTML='<div class="dead"><div class="big">⏻</div><h2 style="font-size:18px;color:var(--fg);text-transform:none;letter-spacing:0;margin:10px 0">TrayDrop è spento</h2><p>Per riaccenderlo lancia <b>python traydrop.py gui</b></p></div>'};
+  document.querySelector('.wrap').innerHTML='<div class="dead"><div class="big">⏻</div><h2 style="font-size:18px;color:var(--fg);text-transform:none;letter-spacing:0;margin:10px 0">'+T('TrayDrop è spento')+'</h2><p>'+T('Per riaccenderlo apri di nuovo TrayDrop')+'</p></div>'};
 
 /* ---------- computer nella rete ---------- */
 function renderNet(s){
   const ps=s.peers||[],net=(s.ip||'').split('.').slice(0,3).join('.');
   let h='';
   for(const p of ps){
-    const title=p.name||p.ip, sub=[p.name?p.ip:'',p.port!==s.port?'porta '+p.port:'',p.missing?'non trovato in questa rete':''].filter(Boolean).join(' · ');
-    const right=p.dest?(p.missing?'<span class="badge warn">Destinatario</span>':'<span class="badge">Destinatario</span>')
-      :`<a class="lnk" data-ip="${esc(p.ip)}" data-port="${p.port}">Collega</a>`;
-    h+=`<div class="it ${p.missing?'err':'in'}"><div class="ic net-ic">${p.missing?'!':esc(title.charAt(0).toUpperCase())}</div><div class="nm"><b>${esc(title)}</b><small>${esc(sub||'TrayDrop acceso')}</small></div><div class="mini">${right}</div></div>`;
+    const title=p.name||p.ip, sub=[p.name?p.ip:'',p.port!==s.port?T('porta {n}',{n:p.port}):'',p.missing?T('non trovato in questa rete'):''].filter(Boolean).join(' · ');
+    const right=p.dest?'<span class="badge'+(p.missing?' warn':'')+'">'+T('Destinatario')+'</span>'
+      :`<a class="lnk" data-ip="${esc(p.ip)}" data-port="${p.port}">${T('Collega')}</a>`;
+    h+=`<div class="it ${p.missing?'err':'in'}"><div class="ic net-ic">${p.missing?'!':esc(title.charAt(0).toUpperCase())}</div><div class="nm"><b>${esc(title)}</b><small>${esc(sub||T('TrayDrop acceso'))}</small></div><div class="mini">${right}</div></div>`;
   }
-  if(!ps.length)h=`<div class="empty">Nessun altro TrayDrop acceso nella rete ${esc(net)}.x</div>`;
-  else if(ps.length===1&&ps[0].missing)h+=`<div class="empty" style="padding:12px">Nessun altro TrayDrop acceso nella rete ${esc(net)}.x</div>`;
+  const none=esc(T('Nessun altro TrayDrop acceso nella rete {net}.x',{net}));
+  if(!ps.length)h=`<div class="empty">${none}</div>`;
+  else if(ps.length===1&&ps[0].missing)h+=`<div class="empty" style="padding:12px">${none}</div>`;
   if(h!==renderNet.h){renderNet.h=h;$('#net').innerHTML=h}
 }
-$('#bScanNet').onclick=async()=>{const b=$('#bScanNet');b.textContent='Cerco…';
-  try{const j=await (await post('/api/scan')).json();last.peers=j.peers;renderNet(last)}catch(e){toast('Ricerca non riuscita')}
-  finally{b.textContent='Aggiorna'}};
+$('#bScanNet').onclick=async()=>{const b=$('#bScanNet');b.textContent=T('Cerco…');
+  try{const j=await (await post('/api/scan')).json();last.peers=j.peers;renderNet(last)}catch(e){toast(T('Ricerca non riuscita'))}
+  finally{b.textContent=T('Aggiorna')}};
 $('#net').addEventListener('click',async e=>{const a=e.target.closest('a[data-ip]');if(!a)return;
   await openSetup(false);$('#fPeer').value=a.dataset.ip;$('#found').innerHTML='';
   if(a.dataset.port&&a.dataset.port!==$('#fPort').value){$('#fPort').value=a.dataset.port;$('#adv').open=true}
-  sMsg('wait','Controlla il token e premi “Salva e prova”.')});
+  sMsg('wait',T('Controlla il token e premi “Salva e prova”.'))});
 
 /* ---------- configurazione del collegamento ---------- */
 let setupShown=false,firstRun=false,cfgNow={},newTok='';
@@ -1553,11 +1650,11 @@ async function openSetup(first){
   $('#fPeer').value=cfgNow.peer||'';$('#fPort').value=cfgNow.port;$('#fInbox').value=cfgNow.inbox;
   ['#fPeer','#fPort','#fTok','#fInbox'].forEach(s=>$(s).classList.remove('bad'));
   const conf=cfgNow.configured;
-  $('#sTitle').textContent=conf?'Collegamento':'Collega i tuoi computer';
-  $('#sIntro').textContent=conf?'Modifica l’altro computer o il token. I cambiamenti valgono subito.'
-    :'Apri TrayDrop anche sull’altro computer. Su UNO dei due scegli “Genera nuovo” e copia il token; sull’altro scegli “Incolla”.';
+  $('#sTitle').textContent=conf?T('Collegamento'):T('Collega i tuoi computer');
+  $('#sIntro').textContent=conf?T('Modifica l’altro computer o il token. I cambiamenti valgono subito.')
+    :T('Apri TrayDrop anche sull’altro computer. Su UNO dei due scegli “Genera nuovo” e copia il token; sull’altro scegli “Incolla”.');
   $('#tmKeep').style.display=conf?'':'none';
-  $('#sCancel').style.display=conf?'':'none';$('#sCancel').textContent='Annulla';
+  $('#sCancel').style.display=conf?'':'none';$('#sCancel').textContent=T('Annulla');
   $('#adv').open=false;
   await setTMode(conf?'keep':'new');
   $('#setup').className='show';
@@ -1568,37 +1665,38 @@ $('#peer').onclick=()=>openSetup(false);
 $('#sCancel').onclick=closeSetup;
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('#setup').className&&cfgNow.configured)closeSetup()});
 async function scan(quiet){
-  const f=$('#found'),b=$('#bScan');b.disabled=true;b.textContent='Cerco…';
+  const f=$('#found'),b=$('#bScan');b.disabled=true;b.textContent=T('Cerco…');
   if(!quiet)f.innerHTML='';
   try{const j=await (await post('/api/discover?port='+encodeURIComponent($('#fPort').value||8787))).json();
     if(j.found.length){f.innerHTML=j.found.map(x=>`<button type="button" data-ip="${esc(x.ip)}" data-port="${x.port}"><span>${esc(x.name||'TrayDrop')}</span><small class="mono">${esc(x.ip)}</small></button>`).join('');
       if(j.found.length===1&&!$('#fPeer').value){$('#fPeer').value=j.found[0].ip}}
-    else if(!quiet)f.innerHTML='<div class="none">Nessun TrayDrop trovato. Controlla che sia aperto sull’altro computer, oppure scrivi l’IP (sull’altro computer è indicato in “Questo computer”).</div>'}
-  catch(e){if(!quiet)f.innerHTML='<div class="none">Ricerca non riuscita: scrivi l’IP a mano.</div>'}
-  finally{b.disabled=false;b.textContent='Cerca'}}
+    else if(!quiet)f.innerHTML='<div class="none">'+esc(T('Nessun TrayDrop trovato. Controlla che sia aperto sull’altro computer, oppure scrivi l’IP (sull’altro computer è indicato in “Questo computer”).'))+'</div>'}
+  catch(e){if(!quiet)f.innerHTML='<div class="none">'+esc(T('Ricerca non riuscita: scrivi l’IP a mano.'))+'</div>'}
+  finally{b.disabled=false;b.textContent=T('Cerca')}}
 $('#bScan').onclick=()=>scan(false);
 $('#found').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;$('#fPeer').value=b.dataset.ip;
   if(b.dataset.port&&b.dataset.port!==$('#fPort').value){$('#fPort').value=b.dataset.port;$('#adv').open=true}
   $('#fPeer').classList.remove('bad')});
 $('#bInbox').onclick=async()=>{const j=await (await post('/api/pick_inbox')).json();if(j.path)$('#fInbox').value=j.path};
 async function copyText(t){try{await navigator.clipboard.writeText(t)}catch(e){const i=document.createElement('textarea');i.value=t;document.body.appendChild(i);i.select();document.execCommand('copy');i.remove()}}
-$('#tkCopy').onclick=async()=>{await copyText(newTok);toast('Token copiato: incollalo nell’altro computer')};
+$('#tkCopy').onclick=async()=>{await copyText(newTok);toast(T('Token copiato: incollalo nell’altro computer'))};
 $('#sSave').onclick=async()=>{
   ['#fPeer','#fPort','#fTok','#fInbox'].forEach(s=>$(s).classList.remove('bad'));
   const m=tmode(),body={peer:$('#fPeer').value.trim(),port:+$('#fPort').value,inbox:$('#fInbox').value.trim()};
   if(m==='new')body.token=newTok;
-  if(m==='paste'){body.token=$('#fTok').value.trim();if(!body.token){$('#fTok').classList.add('bad');sMsg('err','Incolla il token copiato dall’altro computer.');return}}
-  if(!body.peer){$('#fPeer').classList.add('bad');sMsg('err','Scrivi l’IP dell’altro computer o usa “Cerca”.');return}
-  const b=$('#sSave');b.disabled=true;sMsg('wait','Salvo e provo il collegamento…');
+  if(m==='paste'){body.token=$('#fTok').value.trim();if(!body.token){$('#fTok').classList.add('bad');sMsg('err',T('Incolla il token copiato dall’altro computer.'));return}}
+  if(!body.peer){$('#fPeer').classList.add('bad');sMsg('err',T('Scrivi l’IP dell’altro computer o usa “Cerca”.'));return}
+  const b=$('#sSave');b.disabled=true;sMsg('wait',T('Salvo e provo il collegamento…'));
   try{const r=await post('/api/config',body),j=await r.json();
-    if(!r.ok){sMsg('err',j.error||'Errore');const fm={peer:'#fPeer',port:'#fPort',token:'#fTok',inbox:'#fInbox'}[j.field];
+    if(!r.ok){sMsg('err',j.error||T('Errore'));const fm={peer:'#fPeer',port:'#fPort',token:'#fTok',inbox:'#fInbox'}[j.field];
       if(fm){$(fm).classList.add('bad');if(fm==='#fPort'||fm==='#fInbox')$('#adv').open=true}return}
     load();
-    if(j.ping_ok){sMsg('ok','Salvato. '+j.ping_msg);setTimeout(()=>{if($('#setup').className)closeSetup()},1300)}
-    else{sMsg('err','Salvato, ma il test non è riuscito: '+j.ping_msg+(m==='new'?' Hai incollato il nuovo token anche sull’altro computer?':''));
-      cfgNow.configured=true;$('#sCancel').style.display='';$('#sCancel').textContent='Chiudi';$('#tmKeep').style.display=''}}
-  catch(e){sMsg('err','Errore di rete: TrayDrop è ancora acceso?')}
+    if(j.ping_ok){sMsg('ok',T('Salvato.')+' '+j.ping_msg);setTimeout(()=>{if($('#setup').className)closeSetup()},1300)}
+    else{sMsg('err',T('Salvato, ma il test non è riuscito:')+' '+j.ping_msg+(m==='new'?' '+T('Hai incollato il nuovo token anche sull’altro computer?'):''));
+      cfgNow.configured=true;$('#sCancel').style.display='';$('#sCancel').textContent=T('Chiudi');$('#tmKeep').style.display=''}}
+  catch(e){sMsg('err',T('Errore di rete: TrayDrop è ancora acceso?'))}
   finally{b.disabled=false}};
+$('#lang').onchange=async e=>{try{await post('/api/lang',{lang:e.target.value})}catch(err){}location.reload()};
 if(location.hash==='#setup')openSetup(false);
 </script></body></html>"""
 
@@ -1617,28 +1715,28 @@ def apply_config(cfg, new, ui_port=None):
     """Valida e applica la config inviata dalla finestra. Ritorna (ok, risposta)."""
     peer = str(new.get("peer", "")).strip()
     if not peer or len(peer) > 253 or any(c.isspace() or c in "/\\:@" for c in peer):
-        return False, {"error": "Indirizzo dell'altro computer non valido (es. 192.168.1.156)", "field": "peer"}
+        return False, {"error": tr("Indirizzo dell'altro computer non valido (es. 192.168.1.156)"), "field": "peer"}
     try:
         port = int(new.get("port") or cfg["port"])
         if not 1024 <= port <= 65535:
             raise ValueError
     except (TypeError, ValueError):
-        return False, {"error": "Porta non valida: usa un numero tra 1024 e 65535", "field": "port"}
+        return False, {"error": tr("Porta non valida: usa un numero tra 1024 e 65535"), "field": "port"}
     token = new.get("token")
     if token is not None:
         token = str(token).strip()
         if len(token) < 16 or any(c.isspace() for c in token):
-            return False, {"error": "Token non valido: incolla quello completo dell'altro computer", "field": "token"}
+            return False, {"error": tr("Token non valido: incolla quello completo dell'altro computer"), "field": "token"}
     inbox = os.path.expanduser(str(new.get("inbox") or cfg["inbox"]).strip())
     try:
         Path(inbox).mkdir(parents=True, exist_ok=True)
     except OSError as e:
-        return False, {"error": f"Cartella ricevuti non utilizzabile: {e}", "field": "inbox"}
+        return False, {"error": tr("Cartella ricevuti non utilizzabile: {err}", err=e), "field": "inbox"}
     if port != int(cfg["port"]):
         try:
             rebind_receiver(cfg, port)
         except OSError as e:
-            return False, {"error": f"La porta {port} è già occupata: {e.strerror or e}", "field": "port"}
+            return False, {"error": tr("La porta {port} è già occupata: {err}", port=port, err=e.strerror or e), "field": "port"}
         if ui_port:
             cfg["ui_port"] = ui_port  # la finestra resta allo stesso indirizzo anche al prossimo avvio
     cfg.update(peer=peer, port=port, inbox=inbox)
@@ -1648,7 +1746,7 @@ def apply_config(cfg, new, ui_port=None):
     try:
         save_cfg(cfg)
     except OSError as e:
-        return False, {"error": f"Impossibile salvare la configurazione: {e}"}
+        return False, {"error": tr("Impossibile salvare la configurazione: {err}", err=e)}
     ok, info = ping(cfg, timeout=4)
     UI_STATE["online"], UI_STATE["info"] = ok, info
     return True, {"ok": True, "ping_ok": ok, "ping_msg": explain_ping(ok, info)}
@@ -1672,7 +1770,7 @@ REVEAL_LOCK = threading.Lock()
 REVEAL_SECONDS = 20
 
 
-def biometric_auth(reason="Mostra il token di TrayDrop"):
+def biometric_auth(reason=None):
     """Ritorna (True, '') SOLO se l'utente si autentica con l'impronta digitale.
     Nessun ripiego su password/PIN. In caso di dubbio o errore: (False, motivo)."""
     try:
@@ -1680,29 +1778,30 @@ def biometric_auth(reason="Mostra il token di TrayDrop"):
             try:
                 import LocalAuthentication as LA
             except ImportError:
-                return False, ("Manca il modulo per Touch ID. Installa: "
-                               "pip install pyobjc-framework-LocalAuthentication")
+                return False, tr("Manca il modulo per Touch ID. Installa: "
+                                 "pip install pyobjc-framework-LocalAuthentication")
             policy = getattr(LA, "LAPolicyDeviceOwnerAuthenticationWithBiometrics", 1)  # solo biometria
             ctx = LA.LAContext.alloc().init()
             can, err = ctx.canEvaluatePolicy_error_(policy, None)
             if not can:
-                return False, f"Touch ID non disponibile: {err.localizedDescription() if err else 'sconosciuto'}"
+                return False, tr("Touch ID non disponibile: {why}",
+                                 why=err.localizedDescription() if err else tr("sconosciuto"))
             done, res = threading.Event(), {}
 
             def reply(success, error):
                 res["ok"] = bool(success)
                 res["err"] = str(error.localizedDescription()) if error else ""
                 done.set()
-            ctx.evaluatePolicy_localizedReason_reply_(policy, reason, reply)
+            ctx.evaluatePolicy_localizedReason_reply_(policy, reason or tr("Mostra il token di TrayDrop"), reply)
             if not done.wait(60):
-                return False, "Tempo scaduto"
-            return (True, "") if res.get("ok") else (False, res.get("err") or "Impronta non riconosciuta")
+                return False, tr("Tempo scaduto")
+            return (True, "") if res.get("ok") else (False, res.get("err") or tr("Impronta non riconosciuta"))
         if sys.platform.startswith("linux") and shutil.which("fprintd-verify"):
             r = subprocess.run(["fprintd-verify"], capture_output=True, text=True, timeout=45)
-            return ("verify-match" in r.stdout), "Impronta non riconosciuta"
+            return ("verify-match" in r.stdout), tr("Impronta non riconosciuta")
     except Exception as e:
-        return False, f"Autenticazione non riuscita: {e}"
-    return False, "Impronta digitale non supportata su questo sistema"
+        return False, tr("Autenticazione non riuscita: {err}", err=e)
+    return False, tr("Impronta digitale non supportata su questo sistema")
 
 
 class UIHandler(BaseHTTPRequestHandler):
@@ -1731,7 +1830,9 @@ class UIHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         cfg = self.server.cfg
         if path == "/":
-            return self._send(200, UI_HTML, "text/html")
+            page = (UI_HTML.replace("/*I18N*/{}", json.dumps(js_translations(), ensure_ascii=False))
+                    .replace("/*LANG*/'it'", json.dumps(LANG)))
+            return self._send(200, page, "text/html")
         if path == "/api/state":
             with UI_STATE["lock"]:
                 ev = list(UI_STATE["events"])
@@ -1745,7 +1846,8 @@ class UIHandler(BaseHTTPRequestHandler):
                                                "inbox": cfg["inbox"], "events": ev, "clips": clips,
                                                "active": tr_list(), "ip": local_ip(),
                                                "host": socket.gethostname(), "port": cfg["port"],
-                                               "can_reveal": IS_MAC, "peers": peers_list(cfg)}))
+                                               "can_reveal": IS_MAC, "peers": peers_list(cfg),
+                                               "lang": LANG, "lang_setting": cfg.get("lang", "auto")}))
         if path == "/api/config":
             return self._send(200, json.dumps({"configured": is_configured(cfg), "peer": cfg.get("peer", ""),
                                                "port": int(cfg["port"]), "inbox": cfg["inbox"],
@@ -1768,9 +1870,25 @@ class UIHandler(BaseHTTPRequestHandler):
                 if not isinstance(body, dict):
                     raise ValueError
             except ValueError:
-                return self._send(400, json.dumps({"error": "richiesta non valida"}))
+                return self._send(400, json.dumps({"error": tr("richiesta non valida")}))
             ok, res = apply_config(cfg, body, ui_port=self.server.server_address[1])
             return self._send(200 if ok else 400, json.dumps(res))
+        if path == "/api/lang":
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+                want = json.loads(self.rfile.read(n) or b"{}").get("lang", "auto") if 0 < n < 4096 else "auto"
+            except (ValueError, AttributeError):
+                want = "auto"
+            if want in SUPPORTED_LANGS:
+                cfg["lang"] = want
+            else:
+                cfg.pop("lang", None)
+            set_lang(cfg)
+            try:
+                save_cfg(cfg)
+            except OSError:
+                pass
+            return self._send(200, json.dumps({"lang": LANG}))
         if path == "/api/scan":
             scan_network(cfg)
             return self._send(200, json.dumps({"peers": peers_list(cfg)}))
@@ -1787,13 +1905,13 @@ class UIHandler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({"path": paths[0].rstrip("/") if paths else ""}))
         if path == "/api/reveal_token":
             if not REVEAL_LOCK.acquire(blocking=False):
-                return self._send(409, json.dumps({"error": "Autenticazione già in corso"}))
+                return self._send(409, json.dumps({"error": tr("Autenticazione già in corso")}))
             try:
                 ok, msg = biometric_auth()
             finally:
                 REVEAL_LOCK.release()
             if not ok:
-                return self._send(403, json.dumps({"error": msg or "Autenticazione negata"}))
+                return self._send(403, json.dumps({"error": msg or tr("Autenticazione negata")}))
             return self._send(200, json.dumps({"token": cfg["token"], "seconds": REVEAL_SECONDS}))
         if path == "/api/quit":
             self._send(200, "{}")
@@ -1810,7 +1928,7 @@ class UIHandler(BaseHTTPRequestHandler):
             with UI_STATE["lock"]:
                 txt = next((c["text"] for c in UI_STATE["clips"] if c["id"] == cid), None)
             if txt is None:
-                return self._send(404, json.dumps({"error": "non trovato"}))
+                return self._send(404, json.dumps({"error": tr("non trovato")}))
             try:
                 clip_write_text(txt)
             except Exception as e:
@@ -1837,7 +1955,7 @@ class UIHandler(BaseHTTPRequestHandler):
                     while left > 0:
                         buf = self.rfile.read(min(CHUNK, left))
                         if not buf:
-                            raise ConnectionError("upload interrotto")
+                            raise ConnectionError(tr("upload interrotto"))
                         f.write(buf)
                         left -= len(buf)
                         tr_set(tid, done=size - left, frac=0.5 * (size - left) / size if size else 0.5)
@@ -1880,7 +1998,7 @@ def open_window(url, block=False):
         except ImportError:
             pass
         except Exception as e:
-            print("pywebview non utilizzabile:", e)
+            print(tr("pywebview non utilizzabile:"), e)
     launched = False
     try:
         if IS_MAC:
@@ -1911,7 +2029,7 @@ def open_window(url, block=False):
     if not launched:
         webbrowser.open(url)
     if block:
-        print(f"TrayDrop pronto: {url}\nCtrl+C per uscire.")
+        print(tr("TrayDrop pronto: {url}\nCtrl+C per uscire.", url=url))
         try:
             threading.Event().wait()
         except KeyboardInterrupt:
@@ -1922,10 +2040,10 @@ def run_web(cfg):
     """Interfaccia web locale (consigliata): finestra bella, drag & drop, storico."""
     srv, url = start_ui_server(cfg)
     if srv is None:  # un'altra istanza e' gia' attiva: riapri solo la finestra
-        print("TrayDrop e' gia' in esecuzione: riapro la finestra.")
+        print(tr("TrayDrop è già in esecuzione: apro la finestra."))
         return open_window(url)
     start_server(cfg)
-    print(f"In ascolto sulla porta {cfg['port']} -> inbox: {cfg['inbox']}")
+    print(tr("In ascolto sulla porta {port}, file ricevuti in: {inbox}", port=cfg["port"], inbox=cfg["inbox"]))
     open_window(url, block=True)
 
 
@@ -1957,19 +2075,19 @@ def install_login(load_now=True):
         if load_now:  # dal menu dell'app (gia' accesa) basta che valga dal prossimo accesso
             subprocess.run(["launchctl", "unload", str(plist)], capture_output=True)
             subprocess.run(["launchctl", "load", str(plist)])
-        print("Avvio automatico installato:", plist)
+        print(tr("Avvio automatico installato:"), plist)
     elif IS_WIN:
         startup = Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs/Startup"
         f = startup / "TrayDrop.cmd"
         f.write_text(win_cmd_file(["tray"], background=True), encoding="utf-8", newline="")
-        print("Avvio automatico installato:", f)
+        print(tr("Avvio automatico installato:"), f)
     else:
         f = Path.home() / ".config/autostart/traydrop.desktop"
         f.parent.mkdir(parents=True, exist_ok=True)
         exe = " ".join(f'"{c}"' for c in self_cmd("tray"))
         f.write_text(f"[Desktop Entry]\nType=Application\nName=TrayDrop\n"
                      f"Exec={exe}\nX-GNOME-Autostart-enabled=true\n")
-        print("Avvio automatico installato:", f)
+        print(tr("Avvio automatico installato:"), f)
 
 
 def uninstall_login_mac():
@@ -2012,8 +2130,8 @@ def install_app():
     """macOS: crea ~/Applications/TrayDrop.app (doppio clic, Launchpad, Spotlight, Dock).
     L'app contiene una COPIA di traydrop.py: dopo un aggiornamento rilancia install-app."""
     if not IS_MAC:
-        print("install-app serve solo su macOS. Su Windows: install-login / install-shortcut,\n"
-              "oppure crea TrayDrop.exe con PyInstaller (vedi LEGGIMI.md).")
+        print(tr("install-app serve solo su macOS. Su Windows: install-login / install-shortcut,\n"
+                 "oppure crea TrayDrop.exe con PyInstaller (vedi LEGGIMI.md)."))
         return
     import plistlib
     contents = APP_PATH / "Contents"
@@ -2042,11 +2160,11 @@ def install_app():
         plistlib.dump(info, f)
     if Path(LSREGISTER).exists():  # la fa comparire subito in Launchpad / Spotlight
         _run([LSREGISTER, "-f", str(APP_PATH)], capture_output=True)
-    print(f"Creata {APP_PATH}" + ("" if icon else "  (icona non creata: manca sips/iconutil)"))
-    print("Aprila da Launchpad, Spotlight (⌘ Spazio > TrayDrop) o Finder > Applicazioni.\n"
-          "Puoi trascinarla nel Dock. Dopo aver aggiornato traydrop.py rilancia: python traydrop.py install-app")
+    print(tr("Creata {path}", path=APP_PATH) + ("" if icon else "  " + tr("(icona non creata: manca sips/iconutil)")))
+    print(tr("Aprila da Launchpad, Spotlight (⌘ Spazio > TrayDrop) o Finder > Applicazioni.\n"
+             "Puoi trascinarla nel Dock. Dopo aver aggiornato traydrop.py rilancia: python traydrop.py install-app"))
     if MAC_AGENT.exists():
-        print("Aggiorno l'avvio automatico perche' usi l'app (TrayDrop si riavvia)...")
+        print(tr("Aggiorno l'avvio automatico perché usi l'app (TrayDrop si riavvia)..."))
         install_login()
 
 
@@ -2055,9 +2173,9 @@ def install_shortcut():
     if IS_WIN:
         f = Path(os.environ["APPDATA"]) / "Microsoft/Windows/SendTo/TrayDrop.cmd"
         f.write_text(win_cmd_file(["send"]), encoding="utf-8", newline="")
-        print("Aggiunto: tasto destro su file > Invia a > TrayDrop\n ", f)
+        print(tr("Aggiunto: tasto destro su file > Invia a > TrayDrop"), "\n ", f)
     elif IS_MAC:
-        print("Su macOS usa 'Invia selezione del Finder' dal menu ⇄.")
+        print(tr("Su macOS usa 'Invia selezione del Finder' dal menu ⇄."))
     else:
         d = Path.home() / ".local/share/nautilus/scripts"
         d.mkdir(parents=True, exist_ok=True)
@@ -2065,7 +2183,384 @@ def install_shortcut():
         exe = " ".join(f'"{c}"' for c in self_cmd("send"))
         f.write_text(f'#!/bin/bash\nIFS=$\'\\n\'\nexec {exe} $NAUTILUS_SCRIPT_SELECTED_FILE_PATHS\n')
         f.chmod(0o755)
-        print("Aggiunto: tasto destro > Script > Invia con TrayDrop (Nautilus)\n ", f)
+        print(tr("Aggiunto: tasto destro > Script > Invia con TrayDrop (Nautilus)"), "\n ", f)
+
+
+# ------------------------------------------------------------- traduzioni
+# Testo italiano (come scritto nel codice): (inglese, francese, spagnolo).
+# Per aggiungere un testo: usalo con tr("...") / T('...') e aggiungilo qui;
+# il test in .github/workflows controlla che nessun testo resti senza traduzione.
+TRANSLATIONS = {
+    # ---- finestra: testi fissi
+    "Ancora nulla": ("Nothing yet", "Rien pour l'instant", "Nada todavía"),
+    "Copia": ("Copy", "Copier", "Copiar"),
+    "Mostra con impronta": ("Show with fingerprint", "Afficher avec l'empreinte", "Mostrar con huella"),
+    "Destinatario": ("Recipient", "Destinataire", "Destinatario"),
+    "Cerco…": ("Searching…", "Recherche…", "Buscando…"),
+    "Aggiorna": ("Refresh", "Actualiser", "Actualizar"),
+    "Collegamento": ("Connection", "Connexion", "Conexión"),
+    "Collega i tuoi computer": ("Connect your computers", "Connectez vos ordinateurs", "Conecta tus ordenadores"),
+    "Annulla": ("Cancel", "Annuler", "Cancelar"),
+    "Cerca": ("Search", "Rechercher", "Buscar"),
+    "Trascina qui i file": ("Drop files here", "Déposez les fichiers ici", "Arrastra los archivos aquí"),
+    "oppure clicca per sceglierli": ("or click to choose them", "ou cliquez pour les choisir", "o haz clic para elegirlos"),
+    "Invia appunti": ("Send clipboard", "Envoyer le presse-papiers", "Enviar portapapeles"),
+    "Scegli cartella…": ("Choose folder…", "Choisir un dossier…", "Elegir carpeta…"),
+    "Apri ricevuti": ("Open received", "Ouvrir les reçus", "Abrir recibidos"),
+    "Attività": ("Activity", "Activité", "Actividad"),
+    "Testi ricevuti": ("Received texts", "Textes reçus", "Textos recibidos"),
+    "Computer nella rete": ("Computers on the network", "Ordinateurs sur le réseau", "Ordenadores en la red"),
+    "Modifica": ("Edit", "Modifier", "Editar"),
+    "Questo computer": ("This computer", "Cet ordinateur", "Este ordenador"),
+    "Ricevuti in": ("Received in", "Reçus dans", "Recibidos en"),
+    "Lingua": ("Language", "Langue", "Idioma"),
+    "Automatica": ("Automatic", "Automatique", "Automático"),
+    "Altro computer": ("Other computer", "Autre ordinateur", "Otro ordenador"),
+    "Token condiviso": ("Shared token", "Jeton partagé", "Token compartido"),
+    "· lo stesso su entrambi i computer": ("· the same on both computers", "· le même sur les deux ordinateurs",
+                                           "· el mismo en ambos ordenadores"),
+    "Tieni l'attuale": ("Keep current", "Garder l'actuel", "Mantener el actual"),
+    "Genera nuovo": ("Generate new", "Générer", "Generar nuevo"),
+    "Incolla": ("Paste", "Coller", "Pegar"),
+    "Copialo e incollalo nell'altro computer (TrayDrop › Collegamento › Incolla).":
+        ("Copy it and paste it on the other computer (TrayDrop › Connection › Paste).",
+         "Copiez-le et collez-le sur l'autre ordinateur (TrayDrop › Connexion › Coller).",
+         "Cópialo y pégalo en el otro ordenador (TrayDrop › Conexión › Pegar)."),
+    "Avanzate": ("Advanced", "Avancé", "Avanzado"),
+    "Porta": ("Port", "Port", "Puerto"),
+    "· la stessa su entrambi": ("· the same on both", "· le même sur les deux", "· el mismo en ambos"),
+    "Cartella ricevuti": ("Received folder", "Dossier des reçus", "Carpeta de recibidos"),
+    "Scegli…": ("Choose…", "Choisir…", "Elegir…"),
+    "Salva e prova": ("Save and test", "Enregistrer et tester", "Guardar y probar"),
+    "Spegnere TrayDrop?": ("Turn off TrayDrop?", "Arrêter TrayDrop ?", "¿Apagar TrayDrop?"),
+    "Spegni": ("Turn off", "Arrêter", "Apagar"),
+    "Spegni TrayDrop": ("Turn off TrayDrop", "Arrêter TrayDrop", "Apagar TrayDrop"),
+    "Invia il testo o l'immagine che hai copiato": ("Send the text or image you copied",
+                                                    "Envoyer le texte ou l'image copié",
+                                                    "Enviar el texto o la imagen que has copiado"),
+    "es. 192.168.1.156": ("e.g. 192.168.1.156", "ex. 192.168.1.156", "p. ej. 192.168.1.156"),
+    "Incolla qui il token dell'altro computer": ("Paste the other computer's token here",
+                                                 "Collez ici le jeton de l'autre ordinateur",
+                                                 "Pega aquí el token del otro ordenador"),
+    # ---- finestra: testi dinamici
+    "Inviato: {what}": ("Sent: {what}", "Envoyé : {what}", "Enviado: {what}"),
+    "Errore: {err}": ("Error: {err}", "Erreur : {err}", "Error: {err}"),
+    "adesso": ("just now", "à l'instant", "ahora"),
+    "{n} s fa": ("{n} s ago", "il y a {n} s", "hace {n} s"),
+    "{n} min fa": ("{n} min ago", "il y a {n} min", "hace {n} min"),
+    "{n} h fa": ("{n} h ago", "il y a {n} h", "hace {n} h"),
+    "Da configurare": ("Not set up", "À configurer", "Sin configurar"),
+    "Clicca per collegare l’altro computer": ("Click to connect the other computer",
+                                              "Cliquez pour connecter l'autre ordinateur",
+                                              "Haz clic para conectar el otro ordenador"),
+    "Verifica…": ("Checking…", "Vérification…", "Comprobando…"),
+    "Collegato a {peer}": ("Connected to {peer}", "Connecté à {peer}", "Conectado a {peer}"),
+    "Non raggiungibile · {peer}": ("Unreachable · {peer}", "Injoignable · {peer}", "Inaccesible · {peer}"),
+    "porta {n}": ("port {n}", "port {n}", "puerto {n}"),
+    "— non configurato —": ("— not set up —", "— non configuré —", "— sin configurar —"),
+    "errore": ("error", "erreur", "error"),
+    "Ricevuto": ("Received", "Reçu", "Recibido"),
+    "Inviato": ("Sent", "Envoyé", "Enviado"),
+    "{n} caratteri": ("{n} characters", "{n} caractères", "{n} caracteres"),
+    "Copiato negli appunti": ("Copied to clipboard", "Copié dans le presse-papiers", "Copiado al portapapeles"),
+    "Errore nella copia": ("Copy failed", "Échec de la copie", "Error al copiar"),
+    "Errore di rete": ("Network error", "Erreur réseau", "Error de red"),
+    "Per le cartelle usa “Scegli cartella…”": ("For folders use “Choose folder…”",
+                                               "Pour les dossiers, utilisez « Choisir un dossier… »",
+                                               "Para las carpetas usa “Elegir carpeta…”"),
+    "Scegli la cartella…": ("Choose the folder…", "Choisissez le dossier…", "Elige la carpeta…"),
+    "Appoggia il dito sul sensore Touch ID…": ("Place your finger on the Touch ID sensor…",
+                                               "Posez le doigt sur le capteur Touch ID…",
+                                               "Apoya el dedo en el sensor Touch ID…"),
+    "Autenticazione non riuscita": ("Authentication failed", "Échec de l'authentification", "Autenticación fallida"),
+    "Nascondi ({n})": ("Hide ({n})", "Masquer ({n})", "Ocultar ({n})"),
+    "Prima mostra il token con l’impronta": ("First show the token with your fingerprint",
+                                             "Affichez d'abord le jeton avec l'empreinte",
+                                             "Primero muestra el token con la huella"),
+    "Token copiato": ("Token copied", "Jeton copié", "Token copiado"),
+    "Ci sono trasferimenti in corso: verranno interrotti.": ("Transfers are in progress: they will be stopped.",
+                                                             "Des transferts sont en cours : ils seront interrompus.",
+                                                             "Hay transferencias en curso: se interrumpirán."),
+    "Non riceverai file finché non lo riavvii.": ("You won't receive files until you start it again.",
+                                                  "Vous ne recevrez plus de fichiers tant que vous ne le relancez pas.",
+                                                  "No recibirás archivos hasta que lo vuelvas a iniciar."),
+    "TrayDrop è spento": ("TrayDrop is off", "TrayDrop est arrêté", "TrayDrop está apagado"),
+    "Per riaccenderlo apri di nuovo TrayDrop": ("To turn it back on, open TrayDrop again",
+                                                "Pour le relancer, rouvrez TrayDrop",
+                                                "Para volver a encenderlo, abre TrayDrop de nuevo"),
+    "non trovato in questa rete": ("not found on this network", "introuvable sur ce réseau", "no encontrado en esta red"),
+    "Collega": ("Connect", "Connecter", "Conectar"),
+    "TrayDrop acceso": ("TrayDrop running", "TrayDrop actif", "TrayDrop activo"),
+    "Nessun altro TrayDrop acceso nella rete {net}.x": ("No other TrayDrop running on network {net}.x",
+                                                        "Aucun autre TrayDrop actif sur le réseau {net}.x",
+                                                        "Ningún otro TrayDrop activo en la red {net}.x"),
+    "Ricerca non riuscita": ("Search failed", "Échec de la recherche", "La búsqueda ha fallado"),
+    "Controlla il token e premi “Salva e prova”.": ("Check the token and press “Save and test”.",
+                                                    "Vérifiez le jeton et appuyez sur « Enregistrer et tester ».",
+                                                    "Comprueba el token y pulsa “Guardar y probar”."),
+    "Modifica l’altro computer o il token. I cambiamenti valgono subito.":
+        ("Change the other computer or the token. Changes apply immediately.",
+         "Modifiez l'autre ordinateur ou le jeton. Les changements s'appliquent immédiatement.",
+         "Cambia el otro ordenador o el token. Los cambios se aplican al instante."),
+    "Apri TrayDrop anche sull’altro computer. Su UNO dei due scegli “Genera nuovo” e copia il token; sull’altro scegli “Incolla”.":
+        ("Open TrayDrop on the other computer too. On ONE of them choose “Generate new” and copy the token; on the other choose “Paste”.",
+         "Ouvrez aussi TrayDrop sur l'autre ordinateur. Sur l'UN des deux, choisissez « Générer » et copiez le jeton ; sur l'autre, choisissez « Coller ».",
+         "Abre TrayDrop también en el otro ordenador. En UNO de los dos elige “Generar nuevo” y copia el token; en el otro elige “Pegar”."),
+    "Nessun TrayDrop trovato. Controlla che sia aperto sull’altro computer, oppure scrivi l’IP (sull’altro computer è indicato in “Questo computer”).":
+        ("No TrayDrop found. Make sure it is open on the other computer, or type its IP (shown there under “This computer”).",
+         "Aucun TrayDrop trouvé. Vérifiez qu'il est ouvert sur l'autre ordinateur, ou saisissez son IP (indiquée là-bas sous « Cet ordinateur »).",
+         "No se ha encontrado ningún TrayDrop. Comprueba que esté abierto en el otro ordenador, o escribe su IP (aparece allí en “Este ordenador”)."),
+    "Ricerca non riuscita: scrivi l’IP a mano.": ("Search failed: type the IP manually.",
+                                                  "Échec de la recherche : saisissez l'IP à la main.",
+                                                  "La búsqueda ha fallado: escribe la IP a mano."),
+    "Token copiato: incollalo nell’altro computer": ("Token copied: paste it on the other computer",
+                                                     "Jeton copié : collez-le sur l'autre ordinateur",
+                                                     "Token copiado: pégalo en el otro ordenador"),
+    "Incolla il token copiato dall’altro computer.": ("Paste the token copied from the other computer.",
+                                                      "Collez le jeton copié depuis l'autre ordinateur.",
+                                                      "Pega el token copiado del otro ordenador."),
+    "Scrivi l’IP dell’altro computer o usa “Cerca”.": ("Type the other computer's IP or use “Search”.",
+                                                      "Saisissez l'IP de l'autre ordinateur ou utilisez « Rechercher ».",
+                                                      "Escribe la IP del otro ordenador o usa “Buscar”."),
+    "Salvo e provo il collegamento…": ("Saving and testing the connection…",
+                                       "Enregistrement et test de la connexion…",
+                                       "Guardando y probando la conexión…"),
+    "Errore": ("Error", "Erreur", "Error"),
+    "Salvato.": ("Saved.", "Enregistré.", "Guardado."),
+    "Salvato, ma il test non è riuscito:": ("Saved, but the test failed:", "Enregistré, mais le test a échoué :",
+                                            "Guardado, pero la prueba ha fallado:"),
+    "Hai incollato il nuovo token anche sull’altro computer?": ("Did you paste the new token on the other computer too?",
+                                                                "Avez-vous aussi collé le nouveau jeton sur l'autre ordinateur ?",
+                                                                "¿Has pegado el nuevo token también en el otro ordenador?"),
+    "Chiudi": ("Close", "Fermer", "Cerrar"),
+    "Errore di rete: TrayDrop è ancora acceso?": ("Network error: is TrayDrop still running?",
+                                                  "Erreur réseau : TrayDrop est-il toujours actif ?",
+                                                  "Error de red: ¿TrayDrop sigue encendido?"),
+    # ---- fasi dei trasferimenti
+    "Ricezione": ("Receiving", "Réception", "Recibiendo"),
+    "Preparazione": ("Preparing", "Préparation", "Preparando"),
+    "Caricamento": ("Loading", "Chargement", "Cargando"),
+    "Compressione": ("Compressing", "Compression", "Comprimiendo"),
+    "Invio": ("Sending", "Envoi", "Enviando"),
+    # ---- programma: menu, notifiche, errori
+    "Non raggiungibile ({info})": ("Unreachable ({info})", "Injoignable ({info})", "Inaccesible ({info})"),
+    "Destinatario: {addr}": ("Recipient: {addr}", "Destinataire : {addr}", "Destinatario: {addr}"),
+    "Invia appunti (testo / immagine)": ("Send clipboard (text / image)", "Envoyer le presse-papiers (texte / image)",
+                                         "Enviar portapapeles (texto / imagen)"),
+    "Invia file…": ("Send files…", "Envoyer des fichiers…", "Enviar archivos…"),
+    "Invia cartella…": ("Send folder…", "Envoyer un dossier…", "Enviar carpeta…"),
+    "Apri cartella ricevuti": ("Open received folder", "Ouvrir le dossier des reçus", "Abrir carpeta de recibidos"),
+    "Test connessione": ("Test connection", "Tester la connexion", "Probar conexión"),
+    "TrayDrop non è ancora configurato. Apri la finestra (python traydrop.py gui) oppure: python traydrop.py init --peer <IP-altro-computer>":
+        ("TrayDrop is not set up yet. Open the window (python traydrop.py gui) or run: python traydrop.py init --peer <other-computer-IP>",
+         "TrayDrop n'est pas encore configuré. Ouvrez la fenêtre (python traydrop.py gui) ou lancez : python traydrop.py init --peer <IP-autre-ordinateur>",
+         "TrayDrop aún no está configurado. Abre la ventana (python traydrop.py gui) o ejecuta: python traydrop.py init --peer <IP-otro-ordenador>"),
+    "TrayDrop - errore": ("TrayDrop - error", "TrayDrop - erreur", "TrayDrop - error"),
+    "testo ({n} caratteri)": ("text ({n} characters)", "texte ({n} caractères)", "texto ({n} caracteres)"),
+    "serve wl-clipboard (Wayland) o xclip (X11): sudo apt install wl-clipboard xclip":
+        ("wl-clipboard (Wayland) or xclip (X11) is required: sudo apt install wl-clipboard xclip",
+         "wl-clipboard (Wayland) ou xclip (X11) est requis : sudo apt install wl-clipboard xclip",
+         "se necesita wl-clipboard (Wayland) o xclip (X11): sudo apt install wl-clipboard xclip"),
+    "Ricevuto: {name}": ("Received: {name}", "Reçu : {name}", "Recibido: {name}"),
+    "Collegato ✓": ("Connected ✓", "Connecté ✓", "Conectado ✓"),
+    "Non configurato: inserisci l'altro computer.": ("Not set up: enter the other computer.",
+                                                     "Non configuré : indiquez l'autre ordinateur.",
+                                                     "Sin configurar: indica el otro ordenador."),
+    "L'altro computer risponde, ma il token è diverso: usa lo stesso token su entrambi.":
+        ("The other computer answers, but the token is different: use the same token on both.",
+         "L'autre ordinateur répond, mais le jeton est différent : utilisez le même jeton sur les deux.",
+         "El otro ordenador responde, pero el token es distinto: usa el mismo token en ambos."),
+    "A quell'indirizzo non c'è TrayDrop in ascolto: è acceso sull'altro computer? La porta è la stessa?":
+        ("TrayDrop is not listening at that address: is it running on the other computer? Is the port the same?",
+         "TrayDrop n'écoute pas à cette adresse : est-il actif sur l'autre ordinateur ? Le port est-il le même ?",
+         "TrayDrop no está escuchando en esa dirección: ¿está encendido en el otro ordenador? ¿El puerto es el mismo?"),
+    "L'altro computer non risponde: controlla l'IP, il firewall o la VPN.":
+        ("The other computer doesn't answer: check the IP, the firewall or the VPN.",
+         "L'autre ordinateur ne répond pas : vérifiez l'IP, le pare-feu ou le VPN.",
+         "El otro ordenador no responde: comprueba la IP, el cortafuegos o la VPN."),
+    "Indirizzo non trovato: controlla l'IP o il nome.": ("Address not found: check the IP or the name.",
+                                                         "Adresse introuvable : vérifiez l'IP ou le nom.",
+                                                         "Dirección no encontrada: comprueba la IP o el nombre."),
+    "Rete non raggiungibile: i due computer sono sulla stessa rete?":
+        ("Network unreachable: are both computers on the same network?",
+         "Réseau injoignable : les deux ordinateurs sont-ils sur le même réseau ?",
+         "Red inaccesible: ¿están los dos ordenadores en la misma red?"),
+    "gli appunti sono vuoti (o il formato non è supportato)": ("the clipboard is empty (or the format is not supported)",
+                                                               "le presse-papiers est vide (ou le format n'est pas pris en charge)",
+                                                               "el portapapeles está vacío (o el formato no es compatible)"),
+    "Destinatario: da configurare…": ("Recipient: not set up…", "Destinataire : à configurer…", "Destinatario: sin configurar…"),
+    "TrayDrop attivo: ascolto sulla porta {port}, {dest}.\nCerca l'icona ⇄ nella barra dei menu in alto a destra.\nNon la vedi? (notch / barra piena) -> Impostazioni > Barra dei menu > consenti 'Python',\noppure chiudi e usa la finestra:  python traydrop.py gui":
+        ("TrayDrop running: listening on port {port}, {dest}.\nLook for the ⇄ icon in the menu bar at the top right.\nCan't see it? (notch / full bar) -> Settings > Menu Bar > allow 'Python',\nor quit and use the window:  python traydrop.py gui",
+         "TrayDrop actif : écoute sur le port {port}, {dest}.\nCherchez l'icône ⇄ dans la barre des menus en haut à droite.\nVous ne la voyez pas ? (encoche / barre pleine) -> Réglages > Barre des menus > autoriser 'Python',\nou quittez et utilisez la fenêtre :  python traydrop.py gui",
+         "TrayDrop activo: escuchando en el puerto {port}, {dest}.\nBusca el icono ⇄ en la barra de menús arriba a la derecha.\n¿No lo ves? (notch / barra llena) -> Ajustes > Barra de menús > permitir 'Python',\no sal y usa la ventana:  python traydrop.py gui"),
+    "Impronta digitale non supportata su questo sistema": ("Fingerprint is not supported on this system",
+                                                           "L'empreinte digitale n'est pas prise en charge sur ce système",
+                                                           "La huella digital no es compatible con este sistema"),
+    "In ascolto sulla porta {port}, file ricevuti in: {inbox}": ("Listening on port {port}, received files in: {inbox}",
+                                                                 "Écoute sur le port {port}, fichiers reçus dans : {inbox}",
+                                                                 "Escuchando en el puerto {port}, archivos recibidos en: {inbox}"),
+    "Aprila da Launchpad, Spotlight (⌘ Spazio > TrayDrop) o Finder > Applicazioni.\nPuoi trascinarla nel Dock. Dopo aver aggiornato traydrop.py rilancia: python traydrop.py install-app":
+        ("Open it from Launchpad, Spotlight (⌘ Space > TrayDrop) or Finder > Applications.\nYou can drag it to the Dock. After updating traydrop.py run again: python traydrop.py install-app",
+         "Ouvrez-la depuis le Launchpad, Spotlight (⌘ Espace > TrayDrop) ou Finder > Applications.\nVous pouvez la glisser dans le Dock. Après une mise à jour de traydrop.py relancez : python traydrop.py install-app",
+         "Ábrela desde Launchpad, Spotlight (⌘ Espacio > TrayDrop) o Finder > Aplicaciones.\nPuedes arrastrarla al Dock. Tras actualizar traydrop.py vuelve a ejecutar: python traydrop.py install-app"),
+    "immagine {w}×{h}": ("image {w}×{h}", "image {w}×{h}", "imagen {w}×{h}"),
+    "immagine": ("image", "image", "imagen"),
+    "scrittura negli appunti rifiutata": ("writing to the clipboard was refused", "écriture dans le presse-papiers refusée",
+                                          "escritura en el portapapeles rechazada"),
+    "appunti non aggiornati ({err}); salvato in {file}": ("clipboard not updated ({err}); saved as {file}",
+                                                          "presse-papiers non mis à jour ({err}) ; enregistré sous {file}",
+                                                          "portapapeles no actualizado ({err}); guardado como {file}"),
+    "{what}: appunti non aggiornati, salvato in {file}": ("{what}: clipboard not updated, saved as {file}",
+                                                          "{what} : presse-papiers non mis à jour, enregistré sous {file}",
+                                                          "{what}: portapapeles no actualizado, guardado como {file}"),
+    "Ricevuto {what}: è negli appunti, incolla con {key}": ("Received {what}: it's on the clipboard, paste with {key}",
+                                                            "{what} reçu : dans le presse-papiers, collez avec {key}",
+                                                            "Recibido {what}: está en el portapapeles, pega con {key}"),
+    "destinatario non configurato: apri la finestra TrayDrop > Collegamento":
+        ("recipient not set up: open the TrayDrop window > Connection",
+         "destinataire non configuré : ouvrez la fenêtre TrayDrop > Connexion",
+         "destinatario sin configurar: abre la ventana de TrayDrop > Conexión"),
+    "rifiutato ({hint})": ("refused ({hint})", "refusé ({hint})", "rechazado ({hint})"),
+    "troppo grande ({mb} MB): salvalo come file e invialo": ("too large ({mb} MB): save it as a file and send that",
+                                                             "trop volumineux ({mb} Mo) : enregistrez-le dans un fichier et envoyez-le",
+                                                             "demasiado grande ({mb} MB): guárdalo como archivo y envíalo"),
+    "Connessione OK": ("Connection OK", "Connexion OK", "Conexión OK"),
+    "TrayDrop è già in esecuzione: apro la finestra.": ("TrayDrop is already running: opening its window.",
+                                                        "TrayDrop est déjà actif : ouverture de sa fenêtre.",
+                                                        "TrayDrop ya está en ejecución: abriendo su ventana."),
+    "Avvia all'accesso": ("Open at login", "Ouvrir à la connexion", "Abrir al iniciar sesión"),
+    "Pronto  ->  {addr}": ("Ready  ->  {addr}", "Prêt  ->  {addr}", "Listo  ->  {addr}"),
+    "TrayDrop pronto: {url}\nCtrl+C per uscire.": ("TrayDrop ready: {url}\nCtrl+C to quit.",
+                                                   "TrayDrop prêt : {url}\nCtrl+C pour quitter.",
+                                                   "TrayDrop listo: {url}\nCtrl+C para salir."),
+    "Avvio automatico installato:": ("Login item installed:", "Démarrage automatique installé :",
+                                     "Inicio automático instalado:"),
+    "install-app serve solo su macOS. Su Windows: install-login / install-shortcut,\noppure crea TrayDrop.exe con PyInstaller (vedi LEGGIMI.md).":
+        ("install-app is for macOS only. On Windows: install-login / install-shortcut,\nor build TrayDrop.exe with PyInstaller (see README.md).",
+         "install-app est réservé à macOS. Sous Windows : install-login / install-shortcut,\nou créez TrayDrop.exe avec PyInstaller (voir README.md).",
+         "install-app es solo para macOS. En Windows: install-login / install-shortcut,\no crea TrayDrop.exe con PyInstaller (ver README.md)."),
+    "Creata {path}": ("Created {path}", "Créée : {path}", "Creada {path}"),
+    "Aggiorno l'avvio automatico perché usi l'app (TrayDrop si riavvia)...":
+        ("Updating the login item to use the app (TrayDrop restarts)...",
+         "Mise à jour du démarrage automatique pour utiliser l'app (TrayDrop redémarre)...",
+         "Actualizando el inicio automático para usar la app (TrayDrop se reinicia)..."),
+    "Aggiunto: tasto destro su file > Invia a > TrayDrop": ("Added: right-click a file > Send to > TrayDrop",
+                                                            "Ajouté : clic droit sur un fichier > Envoyer vers > TrayDrop",
+                                                            "Añadido: clic derecho en un archivo > Enviar a > TrayDrop"),
+    "Config salvata in {path}\nToken (usa lo STESSO sull'altro computer):\n  {token}":
+        ("Settings saved in {path}\nToken (use the SAME one on the other computer):\n  {token}",
+         "Configuration enregistrée dans {path}\nJeton (utilisez le MÊME sur l'autre ordinateur) :\n  {token}",
+         "Configuración guardada en {path}\nToken (usa el MISMO en el otro ordenador):\n  {token}"),
+    "Appunti": ("Clipboard", "Presse-papiers", "Portapapeles"),
+    "Impossibile ascoltare sulla porta {port}: {err}\nForse TrayDrop è già in esecuzione (chiudilo) o la porta è occupata.":
+        ("Cannot listen on port {port}: {err}\nTrayDrop may already be running (quit it) or the port is in use.",
+         "Impossible d'écouter sur le port {port} : {err}\nTrayDrop est peut-être déjà actif (quittez-le) ou le port est occupé.",
+         "No se puede escuchar en el puerto {port}: {err}\nQuizá TrayDrop ya esté en ejecución (ciérralo) o el puerto esté ocupado."),
+    "connessione chiusa dall'altro computer ({hint})": ("connection closed by the other computer ({hint})",
+                                                        "connexion fermée par l'autre ordinateur ({hint})",
+                                                        "conexión cerrada por el otro ordenador ({hint})"),
+    "impossibile leggere gli appunti: {err}": ("cannot read the clipboard: {err}",
+                                               "impossible de lire le presse-papiers : {err}",
+                                               "no se puede leer el portapapeles: {err}"),
+    "inviati {n} file dagli appunti": ("sent {n} files from the clipboard", "{n} fichiers envoyés depuis le presse-papiers",
+                                       "enviados {n} archivos desde el portapapeles"),
+    "Selettore file non disponibile (serve tkinter e uno schermo): {err}":
+        ("File chooser not available (tkinter and a display are required): {err}",
+         "Sélecteur de fichiers indisponible (tkinter et un écran sont requis) : {err}",
+         "Selector de archivos no disponible (se necesitan tkinter y una pantalla): {err}"),
+    "Manca 'rumps'. Installa con:  pip install rumps\nOppure usa la finestra:        python traydrop.py gui":
+        ("'rumps' is missing. Install it with:  pip install rumps\nOr use the window:               python traydrop.py gui",
+         "'rumps' est manquant. Installez-le avec :  pip install rumps\nOu utilisez la fenêtre :              python traydrop.py gui",
+         "Falta 'rumps'. Instálalo con:  pip install rumps\nO usa la ventana:             python traydrop.py gui"),
+    "Apri finestra TrayDrop": ("Open TrayDrop window", "Ouvrir la fenêtre TrayDrop", "Abrir ventana de TrayDrop"),
+    "Invia selezione del Finder": ("Send Finder selection", "Envoyer la sélection du Finder", "Enviar selección del Finder"),
+    "Scegli file da inviare…": ("Choose files to send…", "Choisir des fichiers à envoyer…", "Elegir archivos para enviar…"),
+    "Scegli cartella da inviare…": ("Choose folder to send…", "Choisir un dossier à envoyer…", "Elegir carpeta para enviar…"),
+    "Collegamento…": ("Connection…", "Connexion…", "Conexión…"),
+    "Esci": ("Quit", "Quitter", "Salir"),
+    "tkinter non disponibile. macOS/Windows: reinstalla Python da python.org; Linux: sudo apt install python3-tk":
+        ("tkinter not available. macOS/Windows: reinstall Python from python.org; Linux: sudo apt install python3-tk",
+         "tkinter indisponible. macOS/Windows : réinstallez Python depuis python.org ; Linux : sudo apt install python3-tk",
+         "tkinter no disponible. macOS/Windows: reinstala Python desde python.org; Linux: sudo apt install python3-tk"),
+    "Invio in corso: {n}…": ("Sending: {n}…", "Envoi en cours : {n}…", "Enviando: {n}…"),
+    "Trascina qui i file da inviare": ("Drop the files to send here", "Déposez ici les fichiers à envoyer",
+                                       "Arrastra aquí los archivos que quieras enviar"),
+    "Per il drag & drop:  pip install tkinterdnd2": ("For drag & drop:  pip install tkinterdnd2",
+                                                     "Pour le glisser-déposer :  pip install tkinterdnd2",
+                                                     "Para arrastrar y soltar:  pip install tkinterdnd2"),
+    "Invio appunti…": ("Sending clipboard…", "Envoi du presse-papiers…", "Enviando portapapeles…"),
+    "Connessione OK ✓": ("Connection OK ✓", "Connexion OK ✓", "Conexión OK ✓"),
+    "Indirizzo dell'altro computer non valido (es. 192.168.1.156)":
+        ("Invalid address for the other computer (e.g. 192.168.1.156)",
+         "Adresse de l'autre ordinateur non valide (ex. 192.168.1.156)",
+         "Dirección del otro ordenador no válida (p. ej. 192.168.1.156)"),
+    "Impronta non riconosciuta": ("Fingerprint not recognized", "Empreinte non reconnue", "Huella no reconocida"),
+    "Autenticazione non riuscita: {err}": ("Authentication failed: {err}", "Échec de l'authentification : {err}",
+                                           "Autenticación fallida: {err}"),
+    "Su macOS usa 'Invia selezione del Finder' dal menu ⇄.": ("On macOS use 'Send Finder selection' from the ⇄ menu.",
+                                                              "Sur macOS, utilisez 'Envoyer la sélection du Finder' dans le menu ⇄.",
+                                                              "En macOS usa 'Enviar selección del Finder' en el menú ⇄."),
+    "Aggiunto: tasto destro > Script > Invia con TrayDrop (Nautilus)":
+        ("Added: right-click > Scripts > Send with TrayDrop (Nautilus)",
+         "Ajouté : clic droit > Scripts > Envoyer avec TrayDrop (Nautilus)",
+         "Añadido: clic derecho > Scripts > Enviar con TrayDrop (Nautilus)"),
+    "checksum errato": ("wrong checksum", "somme de contrôle incorrecte", "suma de verificación incorrecta"),
+    "Inviati: {n}": ("Sent: {n}", "Envoyés : {n}", "Enviados: {n}"),
+    "token diverso, oppure sull'altro computer c'è una versione di TrayDrop senza gli appunti: aggiornala":
+        ("different token, or the other computer has a TrayDrop version without clipboard support: update it",
+         "jeton différent, ou l'autre ordinateur a une version de TrayDrop sans presse-papiers : mettez-la à jour",
+         "token distinto, o el otro ordenador tiene una versión de TrayDrop sin portapapeles: actualízala"),
+    "Nessun file selezionato": ("No file selected", "Aucun fichier sélectionné", "Ningún archivo seleccionado"),
+    "Inviato ✓": ("Sent ✓", "Envoyé ✓", "Enviado ✓"),
+    "Porta non valida: usa un numero tra 1024 e 65535": ("Invalid port: use a number between 1024 and 65535",
+                                                         "Port non valide : utilisez un nombre entre 1024 et 65535",
+                                                         "Puerto no válido: usa un número entre 1024 y 65535"),
+    "Token non valido: incolla quello completo dell'altro computer":
+        ("Invalid token: paste the full token from the other computer",
+         "Jeton non valide : collez le jeton complet de l'autre ordinateur",
+         "Token no válido: pega el token completo del otro ordenador"),
+    "Cartella ricevuti non utilizzabile: {err}": ("Received folder not usable: {err}",
+                                                  "Dossier des reçus inutilisable : {err}",
+                                                  "Carpeta de recibidos no utilizable: {err}"),
+    "Impossibile salvare la configurazione: {err}": ("Cannot save the settings: {err}",
+                                                     "Impossible d'enregistrer la configuration : {err}",
+                                                     "No se puede guardar la configuración: {err}"),
+    "Touch ID non disponibile: {why}": ("Touch ID not available: {why}", "Touch ID indisponible : {why}",
+                                        "Touch ID no disponible: {why}"),
+    "Mostra il token di TrayDrop": ("Show the TrayDrop token", "Afficher le jeton TrayDrop", "Mostrar el token de TrayDrop"),
+    "Tempo scaduto": ("Timed out", "Délai dépassé", "Tiempo agotado"),
+    "pywebview non utilizzabile:": ("pywebview not usable:", "pywebview inutilisable :", "pywebview no utilizable:"),
+    "(icona non creata: manca sips/iconutil)": ("(icon not created: sips/iconutil missing)",
+                                                "(icône non créée : sips/iconutil manquant)",
+                                                "(icono no creado: falta sips/iconutil)"),
+    "trasferimento interrotto": ("transfer interrupted", "transfert interrompu", "transferencia interrumpida"),
+    "Non partirà più all'accesso": ("It won't open at login anymore", "Ne s'ouvrira plus à la connexion",
+                                    "Ya no se abrirá al iniciar sesión"),
+    "Partirà da solo a ogni accesso": ("It will open automatically at every login", "S'ouvrira automatiquement à chaque connexion",
+                                       "Se abrirá automáticamente en cada inicio de sesión"),
+    "Avvio automatico: {err}": ("Login item: {err}", "Démarrage automatique : {err}", "Inicio automático: {err}"),
+    "La porta {port} è già occupata: {err}": ("Port {port} is already in use: {err}", "Le port {port} est déjà utilisé : {err}",
+                                              "El puerto {port} ya está en uso: {err}"),
+    "Manca il modulo per Touch ID. Installa: pip install pyobjc-framework-LocalAuthentication":
+        ("The Touch ID module is missing. Install: pip install pyobjc-framework-LocalAuthentication",
+         "Le module Touch ID est manquant. Installez : pip install pyobjc-framework-LocalAuthentication",
+         "Falta el módulo de Touch ID. Instala: pip install pyobjc-framework-LocalAuthentication"),
+    "Autenticazione già in corso": ("Authentication already in progress", "Authentification déjà en cours",
+                                    "Autenticación ya en curso"),
+    "non trovato": ("not found", "introuvable", "no encontrado"),
+    "sconosciuto": ("unknown", "inconnu", "desconocido"),
+    "richiesta non valida": ("invalid request", "requête non valide", "solicitud no válida"),
+    "Autenticazione negata": ("Authentication denied", "Authentification refusée", "Autenticación denegada"),
+    "upload interrotto": ("upload interrupted", "envoi interrompu", "subida interrumpida"),
+}
+
+
+def js_translations():
+    """Dizionario per la finestra: testo italiano -> lingua attiva."""
+    if LANG == "it":
+        return {}
+    i = SUPPORTED_LANGS.index(LANG) - 1
+    return {k: v[i] for k, v in TRANSLATIONS.items()}
 
 
 # Icona dell'app (PNG 512x512, generata per TrayDrop)
@@ -2380,6 +2875,10 @@ def main():
               "install-app"):
         sub.add_parser(c)
     a = ap.parse_args()
+    try:
+        set_lang(json.loads(CONFIG.read_text()) if CONFIG.exists() else None)
+    except (OSError, ValueError):
+        set_lang(None)
     if a.cmd is None:
         if not FROZEN:
             ap.print_help()
@@ -2393,7 +2892,8 @@ def main():
         if a.inbox:
             cfg["inbox"] = a.inbox
         CONFIG.write_text(json.dumps(cfg, indent=2)); CONFIG.chmod(0o600)
-        print(f"Config salvata in {CONFIG}\nToken (usa lo STESSO sull'altro Mac):\n  {token}")
+        print(tr("Config salvata in {path}\nToken (usa lo STESSO sull'altro computer):\n  {token}",
+                 path=CONFIG, token=token))
         return
     if a.cmd == "install-login":
         return install_login()
@@ -2411,13 +2911,14 @@ def main():
     elif a.cmd == "tk":
         run_tk(cfg)
     elif a.cmd == "serve":
-        start_server(cfg); print(f"In ascolto sulla porta {cfg['port']}, inbox: {cfg['inbox']}")
+        start_server(cfg)
+        print(tr("In ascolto sulla porta {port}, file ricevuti in: {inbox}", port=cfg["port"], inbox=cfg["inbox"]))
         threading.Event().wait()
     elif a.cmd == "ping":
         ok, info = ping(cfg); print("OK" if ok else f"KO ({info})"); sys.exit(0 if ok else 1)
     elif a.cmd == "clip":
         ok, msg = send_clipboard(cfg)
-        print(("Inviato: " if ok else "Errore: ") + msg)
+        print(tr("Inviato: {what}", what=msg) if ok else tr("Errore: {err}", err=msg))
         sys.exit(0 if ok else 1)
     elif a.cmd == "send":
         ok, errs = send_many(cfg, a.files); sys.exit(1 if errs else 0)

@@ -1,26 +1,36 @@
 # TrayDrop
 
-Invia file, cartelle e appunti (testo e immagini) tra i tuoi computer sulla stessa rete
-locale, con un clic dall'icona ⇄ nella barra dei menu (Mac) o nell'area di notifica (Windows).
+Send files, folders and clipboard contents (text and images) between your own computers on the
+same local network, with one click from the ⇄ icon in the menu bar (Mac) or system tray (Windows).
+Available in English, Italiano, Français and Español.
 
-## Scaricare l'app già pronta
+## Download
 
-- **Versione ufficiale**: pagina [Releases](../../releases) → `TrayDrop-macOS-AppleSilicon.dmg`,
-  `TrayDrop-macOS-Intel.dmg` oppure `TrayDrop-Windows.exe`.
-- **Ultima versione di prova**: [Actions](../../actions/workflows/build.yml) → l'esecuzione più
-  recente con la spunta verde → in fondo, sezione **Artifacts**.
+- **Stable version**: [Releases](../../releases) → `TrayDrop-macOS-AppleSilicon.dmg`,
+  `TrayDrop-macOS-Intel.dmg` or `TrayDrop-Windows.exe`.
+- **Latest build**: [Actions](../../actions/workflows/build.yml) → most recent run with a green
+  check mark → **Artifacts** at the bottom.
 
-Mac: apri il DMG e trascina TrayDrop in Applicazioni. La prima volta: tasto destro sull'app →
-Apri → Apri (l'app non è firmata da Apple).
-Windows: avvia `TrayDrop-Windows.exe`; se SmartScreen avvisa: "Ulteriori informazioni" → "Esegui comunque".
+**Mac**: open the DMG and drag TrayDrop to Applications. The app is not signed by Apple: the first
+time, open it, then go to System Settings → Privacy & Security → “Open Anyway”
+(or run `xattr -dr com.apple.quarantine /Applications/TrayDrop.app`).
+**Windows**: run `TrayDrop-Windows.exe`; if SmartScreen warns you: “More info” → “Run anyway”.
 
-Al primo avvio si apre la finestra **Collega i tuoi computer**: "Cerca" trova l'altro
-computer, su uno dei due "Genera nuovo" token, sull'altro "Incolla".
+On first launch the **Connect your computers** window opens: “Search” finds the other computer;
+on one of the two choose “Generate new” token, on the other “Paste”.
 
-## Pubblicare una nuova versione
+## Features
+
+- Drag & drop files and folders (folders travel as .zip), progress bar with speed
+- Send the clipboard: text and images land directly in the other computer's clipboard
+- Finds the other TrayDrop computers on the network automatically
+- Requests signed with a shared token (HMAC-SHA256) and SHA-256 checksums.
+  Content is **not encrypted** on the local network: use it on networks you trust.
+
+## Release a new version
 
     git tag v1.1 && git push origin v1.1
 
-GitHub Actions compila i tre file, li prova e crea la Release.
+GitHub Actions builds the three files, tests them and publishes the Release.
 
-Istruzioni complete, uso da terminale e note tecniche: [LEGGIMI.md](LEGGIMI.md).
+Full documentation (Italian): [LEGGIMI.md](LEGGIMI.md). License: see [LICENSE](LICENSE) when present.
