@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+*.dmg
+*.exe
+*.icns
+*.ico
+.DS_Store

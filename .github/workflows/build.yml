@@ -1,0 +1,127 @@
+name: Build
+
+# Compila TrayDrop per macOS (Apple Silicon e Intel, .dmg) e Windows (.exe).
+# - ad ogni push su main e su richiesta (Actions > Build > Run workflow): file scaricabili
+#   in fondo alla pagina dell'esecuzione, sezione "Artifacts";
+# - con un tag v* (es. v1.0): in piu' crea una Release con i file allegati.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    name: Controllo codice
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compila e analizza
+        run: |
+          python -m py_compile traydrop.py
+          python -c "import ast; ast.parse(open('traydrop.py', encoding='utf-8').read(), feature_version=(3, 9))"
+          pip install -q pyflakes
+          python -m pyflakes traydrop.py
+          bash -n crea_dmg.sh
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: AppleSilicon
+          - runner: macos-15-intel
+            arch: Intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Crea il DMG
+        env:
+          PYTHON: python
+        run: bash crea_dmg.sh
+      - name: Prova l'app contenuta nel DMG
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/mnt"
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/mnt" TrayDrop.dmg
+          APP="$RUNNER_TEMP/mnt/TrayDrop.app/Contents/MacOS/TrayDrop"
+          export TRAYDROP_HOME="$RUNNER_TEMP/td" TRAYDROP_INBOX="$RUNNER_TEMP/inbox"
+          "$APP" init --peer 127.0.0.1 --port 9555 --token ci_test_token_1234567890
+          "$APP" serve & PID=$!
+          sleep 8
+          "$APP" ping
+          kill $PID || true
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$RUNNER_TEMP/mnt/TrayDrop.app/Contents/Info.plist")" = "true"
+          hdiutil detach "$RUNNER_TEMP/mnt"
+      - name: Rinomina
+        run: mv TrayDrop.dmg "TrayDrop-macOS-${{ matrix.arch }}.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TrayDrop-macOS-${{ matrix.arch }}
+          path: TrayDrop-macOS-${{ matrix.arch }}.dmg
+          if-no-files-found: error
+
+  windows:
+    name: Windows
+    needs: check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Dipendenze
+        run: python -m pip install -q pyinstaller pystray pillow
+      - name: Icona
+        run: python -c "import base64, io, traydrop as t; from PIL import Image; Image.open(io.BytesIO(base64.b64decode(t.ICON_PNG_B64))).save('TrayDrop.ico', sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+      - name: Compila TrayDrop.exe
+        run: pyinstaller --noconfirm --clean --log-level WARN --onefile --noconsole --name TrayDrop --icon TrayDrop.ico --hidden-import pystray._win32 traydrop.py
+      - name: Prova l'exe
+        shell: pwsh
+        run: |
+          $env:TRAYDROP_HOME = "$env:RUNNER_TEMP\td"
+          $env:TRAYDROP_INBOX = "$env:RUNNER_TEMP\inbox"
+          $exe = (Resolve-Path dist\TrayDrop.exe).Path
+          $i = Start-Process $exe -ArgumentList "init","--peer","127.0.0.1","--port","9555","--token","ci_test_token_1234567890" -Wait -PassThru
+          if ($i.ExitCode -ne 0) { throw "init fallito" }
+          $srv = Start-Process $exe -ArgumentList "serve" -PassThru
+          Start-Sleep -Seconds 12
+          $p = Start-Process $exe -ArgumentList "ping" -Wait -PassThru
+          Stop-Process -Id $srv.Id -Force -ErrorAction SilentlyContinue
+          if ($p.ExitCode -ne 0) { throw "ping fallito (exit $($p.ExitCode))" }
+          Write-Host "ping OK"
+      - name: Rinomina
+        run: Move-Item dist\TrayDrop.exe TrayDrop-Windows.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TrayDrop-Windows
+          path: TrayDrop-Windows.exe
+          if-no-files-found: error
+
+  release:
+    name: Pubblica la release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          generate_release_notes: true
