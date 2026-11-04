@@ -57,6 +57,10 @@ Da creare UNA volta su un Mac, dalla cartella TRAYDROP:
 - Per cambiare in seguito: pannello "Collegamento" > "Modifica", oppure menu ⇄ > "Collegamento…".
   I cambiamenti valgono subito, senza riavviare.
 - "Avanzate": porta (la stessa su entrambi) e cartella dei ricevuti.
+- Pannello "Computer nella rete" nella finestra: elenca i TrayDrop accesi nella stessa rete
+  (si aggiorna da solo ogni 20 s, oppure "Aggiorna"). "Collega" apre la configurazione con
+  quel computer gia' inserito. Se il destinatario non compare, i due computer non sono
+  sulla stessa rete (o la rete blocca la ricerca: in quel caso l'IP si scrive a mano).
 - "Cerca" usa un messaggio broadcast in LAN (senza token). Se una rete o Netskope lo
   blocca, basta scrivere l'IP a mano.
 - Da terminale funziona ancora:  python traydrop.py init --peer <IP> [--token <TOKEN>]

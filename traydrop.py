@@ -714,6 +714,48 @@ def start_discovery_responder(cfg, port=None):
     threading.Thread(target=loop, daemon=True).start()
 
 
+PEERS = {}  # ip -> {ip, name, port, seen}: altri TrayDrop visti in rete
+_peers_lock = threading.Lock()
+PEER_TTL = 65  # secondi senza risposta prima di toglierlo dall'elenco
+
+
+def scan_network(cfg):
+    """Cerca gli altri TrayDrop e aggiorna l'elenco (chi non risponde da un po' sparisce)."""
+    found = discover(int(cfg["port"]), wait=1.2)
+    now = time.time()
+    with _peers_lock:
+        for f in found:
+            PEERS[f["ip"]] = dict(f, seen=now)
+        for ip in [ip for ip, p in PEERS.items() if now - p["seen"] > PEER_TTL]:
+            del PEERS[ip]
+
+
+def peers_list(cfg):
+    """Elenco per la finestra; il destinatario attuale c'e' sempre, anche se non risponde."""
+    dest = (cfg.get("peer") or "").lower() if is_configured(cfg) else ""
+    with _peers_lock:
+        items = [dict(p) for p in PEERS.values()]
+    out, dest_seen = [], False
+    for p in sorted(items, key=lambda x: (x["name"].lower(), x["ip"])):
+        names = {p["ip"], p["name"].lower(), p["name"].lower() + ".local"}
+        is_dest = bool(dest) and dest in names
+        dest_seen = dest_seen or is_dest
+        out.append({"ip": p["ip"], "name": p["name"], "port": p["port"], "dest": is_dest, "missing": False})
+    if dest and not dest_seen:
+        out.insert(0, {"ip": cfg["peer"], "name": "", "port": int(cfg.get("peer_port", cfg["port"])),
+                       "dest": True, "missing": True})
+    return out
+
+
+def _scan_loop(cfg):
+    while True:
+        try:
+            scan_network(cfg)
+        except Exception:
+            pass
+        time.sleep(20)
+
+
 def discover(port=DEFAULT_PORT, wait=1.6, targets=None):
     """Cerca altri TrayDrop accesi nella LAN. Ritorna [{ip, name, port}]."""
     if targets is None:
@@ -1326,6 +1368,10 @@ summary{cursor:pointer;color:var(--mut);font-size:13px;margin-bottom:10px}
 .smsg.wait{background:var(--bg);color:var(--mut)}
 .pill{cursor:pointer}
 .sbox .row{margin:0}
+.badge{font-size:12px;padding:3px 9px;border-radius:99px;background:color-mix(in srgb,var(--ok) 15%,transparent);color:var(--ok);font-weight:600}
+.badge.warn{background:color-mix(in srgb,var(--bad) 13%,transparent);color:var(--bad)}
+.net-ic{font-size:15px}
+#net .mini{flex:none}
 </style></head>
 <body><div class="wrap">
 <header><h1>Tray<span>Drop</span></h1>
@@ -1343,6 +1389,9 @@ summary{cursor:pointer;color:var(--mut);font-size:13px;margin-bottom:10px}
 
 <div id="clipsBox" style="display:none"><h2 style="margin-top:24px">Testi ricevuti</h2>
 <div id="clips" class="list"></div></div>
+
+<div class="h2r"><h2>Computer nella rete</h2><a id="bScanNet" class="lnk">Aggiorna</a></div>
+<div id="net" class="list"><div class="empty">Cerco…</div></div>
 
 <div class="h2r"><h2>Collegamento</h2><a id="bEdit" class="lnk">Modifica</a></div>
 <div class="list">
@@ -1394,6 +1443,7 @@ function render(){
   $('#me').textContent=(s.host?s.host+' · ':'')+(s.ip||'?')+' · porta '+(s.port||'');
   $('#to').textContent=s.configured?s.peer:'— non configurato —';
   $('#tokMini').style.display=s.can_reveal?'':'none';
+  renderNet(s);
   if(!s.configured&&!setupShown&&!dead)openSetup(true);
   $('#inboxp').textContent=s.inbox||'';
   let h='';
@@ -1462,6 +1512,28 @@ $('#bOff').onclick=()=>{const n=(last.active||[]).length;$('#mTxt').textContent=
 $('#mNo').onclick=()=>$('#modal').className='';
 $('#mYes').onclick=async()=>{$('#modal').className='';dead=true;try{await fetch(q('/api/quit'),{method:'POST'})}catch(e){}
   document.querySelector('.wrap').innerHTML='<div class="dead"><div class="big">⏻</div><h2 style="font-size:18px;color:var(--fg);text-transform:none;letter-spacing:0;margin:10px 0">TrayDrop è spento</h2><p>Per riaccenderlo lancia <b>python traydrop.py gui</b></p></div>'};
+
+/* ---------- computer nella rete ---------- */
+function renderNet(s){
+  const ps=s.peers||[],net=(s.ip||'').split('.').slice(0,3).join('.');
+  let h='';
+  for(const p of ps){
+    const title=p.name||p.ip, sub=[p.name?p.ip:'',p.port!==s.port?'porta '+p.port:'',p.missing?'non trovato in questa rete':''].filter(Boolean).join(' · ');
+    const right=p.dest?(p.missing?'<span class="badge warn">Destinatario</span>':'<span class="badge">Destinatario</span>')
+      :`<a class="lnk" data-ip="${esc(p.ip)}" data-port="${p.port}">Collega</a>`;
+    h+=`<div class="it ${p.missing?'err':'in'}"><div class="ic net-ic">${p.missing?'!':esc(title.charAt(0).toUpperCase())}</div><div class="nm"><b>${esc(title)}</b><small>${esc(sub||'TrayDrop acceso')}</small></div><div class="mini">${right}</div></div>`;
+  }
+  if(!ps.length)h=`<div class="empty">Nessun altro TrayDrop acceso nella rete ${esc(net)}.x</div>`;
+  else if(ps.length===1&&ps[0].missing)h+=`<div class="empty" style="padding:12px">Nessun altro TrayDrop acceso nella rete ${esc(net)}.x</div>`;
+  if(h!==renderNet.h){renderNet.h=h;$('#net').innerHTML=h}
+}
+$('#bScanNet').onclick=async()=>{const b=$('#bScanNet');b.textContent='Cerco…';
+  try{const j=await (await post('/api/scan')).json();last.peers=j.peers;renderNet(last)}catch(e){toast('Ricerca non riuscita')}
+  finally{b.textContent='Aggiorna'}};
+$('#net').addEventListener('click',async e=>{const a=e.target.closest('a[data-ip]');if(!a)return;
+  await openSetup(false);$('#fPeer').value=a.dataset.ip;$('#found').innerHTML='';
+  if(a.dataset.port&&a.dataset.port!==$('#fPort').value){$('#fPort').value=a.dataset.port;$('#adv').open=true}
+  sMsg('wait','Controlla il token e premi “Salva e prova”.')});
 
 /* ---------- configurazione del collegamento ---------- */
 let setupShown=false,firstRun=false,cfgNow={},newTok='';
@@ -1673,7 +1745,7 @@ class UIHandler(BaseHTTPRequestHandler):
                                                "inbox": cfg["inbox"], "events": ev, "clips": clips,
                                                "active": tr_list(), "ip": local_ip(),
                                                "host": socket.gethostname(), "port": cfg["port"],
-                                               "can_reveal": IS_MAC}))
+                                               "can_reveal": IS_MAC, "peers": peers_list(cfg)}))
         if path == "/api/config":
             return self._send(200, json.dumps({"configured": is_configured(cfg), "peer": cfg.get("peer", ""),
                                                "port": int(cfg["port"]), "inbox": cfg["inbox"],
@@ -1699,6 +1771,9 @@ class UIHandler(BaseHTTPRequestHandler):
                 return self._send(400, json.dumps({"error": "richiesta non valida"}))
             ok, res = apply_config(cfg, body, ui_port=self.server.server_address[1])
             return self._send(200 if ok else 400, json.dumps(res))
+        if path == "/api/scan":
+            scan_network(cfg)
+            return self._send(200, json.dumps({"peers": peers_list(cfg)}))
         if path == "/api/gen_token":
             return self._send(200, json.dumps({"token": secrets.token_urlsafe(24)}))
         if path == "/api/discover":
@@ -1789,6 +1864,7 @@ def start_ui_server(cfg):
     srv.cfg, srv.key = cfg, key
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     threading.Thread(target=_ping_loop, args=(cfg,), daemon=True).start()
+    threading.Thread(target=_scan_loop, args=(cfg,), daemon=True).start()
     return srv, url
 
 
