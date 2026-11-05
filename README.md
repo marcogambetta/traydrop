@@ -33,6 +33,7 @@ on one of the two choose “Generate new” token, on the other “Paste”.
 - Drag & drop files and folders (folders travel as .zip), progress bar with speed
 - Send the clipboard: text and images land directly in the other computer's clipboard
 - Finds the other TrayDrop computers on the network automatically
+- Updates itself: checks the latest GitHub Release and installs it with one click
 - Requests signed with a shared token (HMAC-SHA256) and SHA-256 checksums.
   Content is **not encrypted** on the local network: use it on networks you trust.
 
@@ -40,6 +41,7 @@ on one of the two choose “Generate new” token, on the other “Paste”.
 
     git tag v1.1 && git push origin v1.1
 
-GitHub Actions builds the three files, tests them and publishes the Release.
+GitHub Actions stamps the version, builds all packages, tests them and publishes the Release;
+installed copies then offer the update automatically.
 
 Full documentation (Italian): [LEGGIMI.md](LEGGIMI.md). License: see [LICENSE](LICENSE) when present.

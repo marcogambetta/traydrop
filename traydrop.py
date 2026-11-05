@@ -20,7 +20,7 @@ Uso:
   python traydrop.py install-app     # macOS: crea TrayDrop.app in Applicazioni (Launchpad, Spotlight)
   python3 traydrop.py install-shortcut  # 'Invia a > TrayDrop' in Esplora file / Nautilus
 """
-import argparse, hashlib, hmac, http.client, json, os, secrets, shutil
+import argparse, hashlib, hmac, http.client, json, os, platform, secrets, shutil
 import shlex, socket, struct, subprocess, sys, tempfile, threading, time, webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 HOME = Path(os.environ.get("TRAYDROP_HOME", Path.home() / ".traydrop"))
 CONFIG = HOME / "config.json"
 DEFAULT_PORT = 8787
+VERSION = "1.0.0"  # al rilascio GitHub Actions la sostituisce con il tag (v1.2.0 -> 1.2.0)
 CHUNK = 1024 * 1024
 CLIP_MAX = 50 * 1024 * 1024  # limite per testo/immagine dagli appunti
 
@@ -117,7 +118,7 @@ def load_cfg(allow_missing=False):
 def save_cfg(cfg):
     """Salva la config in modo atomico, leggibile solo dall'utente."""
     HOME.mkdir(parents=True, exist_ok=True)
-    data = {k: cfg[k] for k in ("peer", "port", "peer_port", "token", "inbox", "ui_port", "lang")
+    data = {k: cfg[k] for k in ("peer", "port", "peer_port", "token", "inbox", "ui_port", "lang", "auto_update")
             if cfg.get(k) not in (None, "")}
     tmp = CONFIG.with_name(CONFIG.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=2))
@@ -145,6 +146,17 @@ OPEN_WINDOW_AT_START = False  # Linux, doppio clic: apre anche la finestra (non 
 
 
 FROZEN = getattr(sys, "frozen", False)  # True dentro un .exe / .app creato con PyInstaller
+if FROZEN:
+    # I programmi avviati da TrayDrop impacchettato (una nuova copia di TrayDrop dopo un
+    # aggiornamento, il selettore file, xclip, notify-send...) devono partire "puliti":
+    # senza questo erediterebbero le variabili interne di PyInstaller e si bloccherebbero.
+    os.environ["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    if IS_LINUX:
+        _orig = os.environ.pop("LD_LIBRARY_PATH_ORIG", None)
+        if _orig is not None:
+            os.environ["LD_LIBRARY_PATH"] = _orig
+        else:
+            os.environ.pop("LD_LIBRARY_PATH", None)
 
 
 def self_cmd(*args, console=True):
@@ -1163,6 +1175,9 @@ def run_menubar(cfg):
             self.peer_item = rumps.MenuItem(peer_label(cfg))
             self.login_item = item("Avvia all'accesso", self.toggle_login)
             self.login_item.state = MAC_AGENT.exists()
+            self.upd_item = rumps.MenuItem(update_menu_label(),
+                                           callback=lambda _: threading.Thread(target=update_action, args=(cfg,),
+                                                                               daemon=True).start())
             self.menu = [
                 item("Apri finestra TrayDrop", lambda _: open_window(ui_url)),
                 item("Invia appunti (testo / immagine)", self.clip),
@@ -1174,6 +1189,7 @@ def run_menubar(cfg):
                 item("Test connessione", lambda _: _ping_notify(cfg)),
                 item("Collegamento…", lambda _: open_window(ui_url + "#setup")),
                 self.login_item,
+                self.upd_item,
                 self.peer_item,
                 None,
             ]
@@ -1182,6 +1198,7 @@ def run_menubar(cfg):
 
         def refresh(self, _):
             self.peer_item.title = peer_label(cfg)
+            self.upd_item.title = update_menu_label()
             for it, text in self._items:
                 if it.title != tr(text):
                     it.title = tr(text)
@@ -1267,6 +1284,8 @@ def run_tray(cfg):
         pystray.MenuItem(lambda item: tr("Test connessione"),
                          lambda: threading.Thread(target=_ping_notify, args=(cfg,), daemon=True).start()),
         pystray.MenuItem(lambda item: tr("Collegamento…"), lambda: open_window(ui_url + "#setup")),
+        pystray.MenuItem(lambda item: update_menu_label(),
+                         lambda: threading.Thread(target=update_action, args=(cfg,), daemon=True).start()),
         pystray.MenuItem(lambda item: peer_label(cfg), None, enabled=False),
         pystray.MenuItem(lambda item: tr("Esci"), lambda icon: icon.stop()),
     )
@@ -1464,6 +1483,14 @@ summary{cursor:pointer;color:var(--mut);font-size:13px;margin-bottom:10px}
 .smsg.wait{background:var(--bg);color:var(--mut)}
 .pill{cursor:pointer}
 .sbox .row{margin:0}
+.upd{display:flex;align-items:center;gap:12px;justify-content:space-between;margin:0 0 14px;padding:12px 14px;border-radius:14px;background:color-mix(in srgb,var(--acc) 12%,var(--card));border:1px solid color-mix(in srgb,var(--acc) 35%,var(--line))}
+.upd .ut{display:flex;flex-direction:column;gap:2px;min-width:0}
+.upd small{color:var(--mut);font-size:12.5px}
+.upd .ua{display:flex;align-items:center;gap:12px;flex:none}
+.upd button{padding:8px 14px}
+.upd.err small{color:var(--bad)}
+.chk{display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-weight:400}
+.chk input{width:auto;margin:0}
 select{font:inherit;font-size:14px;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:4px 8px}
 .badge{font-size:12px;padding:3px 9px;border-radius:99px;background:color-mix(in srgb,var(--ok) 15%,transparent);color:var(--ok);font-weight:600}
 .badge.warn{background:color-mix(in srgb,var(--bad) 13%,transparent);color:var(--bad)}
@@ -1474,6 +1501,8 @@ select{font:inherit;font-size:14px;color:var(--fg);background:var(--bg);border:1
 <header><h1>Tray<span>Drop</span></h1>
 <div class="hd"><div id="peer" class="pill"><i class="dot"></i><span id="peerTxt">…</span></div>
 <button id="bOff" class="off-btn" title="Spegni TrayDrop">⏻</button></div></header>
+<div id="upd" class="upd" hidden><div class="ut"><b id="updTxt"></b><small id="updSub"></small></div>
+<div class="ua"><a id="updNotes" class="lnk">Novità</a><button id="updBtn" class="pri">Aggiorna</button></div></div>
 
 <div id="drop" class="drop"><div class="big">⇅</div>
 <b>Trascina qui i file</b><p>oppure clicca per sceglierli</p></div>
@@ -1499,6 +1528,8 @@ select{font:inherit;font-size:14px;color:var(--fg);background:var(--bg);border:1
 <div class="kvr"><span>Lingua</span><b><select id="lang">
   <option value="auto">Automatica</option><option value="it">Italiano</option><option value="en">English</option>
   <option value="fr">Français</option><option value="es">Español</option></select></b></div>
+<div class="kvr"><span>Versione</span><b><span id="ver" class="mono"></span> · <a id="updCheck" class="lnk">Controlla aggiornamenti</a></b></div>
+<div class="kvr"><span>Aggiornamenti</span><b><label class="chk"><input type="checkbox" id="updAuto"> <span>controlla ogni giorno</span></label></b></div>
 </div>
 </div><div id="toast"></div>
 <div id="setup"><div class="box sbox">
@@ -1551,6 +1582,7 @@ function render(){
   if(document.activeElement!==$('#lang'))$('#lang').value=s.lang_setting||'auto';
   $('#tokMini').style.display=s.can_reveal?'':'none';
   renderNet(s);
+  renderUpd(s);
   if(!s.configured&&!setupShown&&!dead)openSetup(true);
   $('#inboxp').textContent=s.inbox||'';
   let h='';
@@ -1619,6 +1651,36 @@ $('#bOff').onclick=()=>{const n=(last.active||[]).length;$('#mTxt').textContent=
 $('#mNo').onclick=()=>$('#modal').className='';
 $('#mYes').onclick=async()=>{$('#modal').className='';dead=true;try{await fetch(q('/api/quit'),{method:'POST'})}catch(e){}
   document.querySelector('.wrap').innerHTML='<div class="dead"><div class="big">⏻</div><h2 style="font-size:18px;color:var(--fg);text-transform:none;letter-spacing:0;margin:10px 0">'+T('TrayDrop è spento')+'</h2><p>'+T('Per riaccenderlo apri di nuovo TrayDrop')+'</p></div>'};
+
+/* ---------- aggiornamenti ---------- */
+let firstVer='';
+function renderUpd(s){
+  if(!s.version)return;
+  if(!firstVer)firstVer=s.version; else if(s.version!==firstVer){location.reload();return}  // TrayDrop aggiornato: ricarica
+  $('#ver').textContent=s.version;
+  if(document.activeElement!==$('#updAuto'))$('#updAuto').checked=s.auto_update!==false;
+  const u=s.update||{},box=$('#upd'),btn=$('#updBtn');
+  const show=['available','downloading','installing'].includes(u.status);
+  box.hidden=!show;if(!show)return;
+  box.classList.toggle('err',!!u.error);
+  if(u.status==='available'){
+    $('#updTxt').textContent=T('È disponibile TrayDrop {v}',{v:u.version});
+    $('#updSub').textContent=u.error||(u.can_install?T('Si installa e riavvia da solo.'):T('Scaricala dalla pagina della Release.'));
+    btn.hidden=false;btn.disabled=false;btn.textContent=u.can_install?T('Aggiorna e riavvia'):T('Scarica')}
+  else{btn.hidden=true;
+    $('#updTxt').textContent=u.status==='downloading'?T('Scarico l’aggiornamento… {p}%',{p:Math.round((u.progress||0)*100)}):T('Installo e riavvio…');
+    $('#updSub').textContent=T('Non chiudere TrayDrop.')}
+}
+$('#updBtn').onclick=async()=>{const u=(last.update||{});
+  if(!u.can_install){post('/api/open_release');return}
+  $('#updBtn').disabled=true;try{await post('/api/update_install')}catch(e){}load()};
+$('#updNotes').onclick=()=>post('/api/open_release');
+$('#updCheck').onclick=async()=>{const a=$('#updCheck');a.textContent=T('Controllo…');
+  try{const u=await (await post('/api/update_check')).json();last.update=u;renderUpd(last);
+    if(u.status==='uptodate')toast(T('Hai già l’ultima versione ({v})',{v:last.version}));
+    else if(u.status==='error')toast(u.error)}
+  catch(e){toast(T('Errore di rete'))}finally{a.textContent=T('Controlla aggiornamenti')}};
+$('#updAuto').onchange=e=>post('/api/update_auto',{on:e.target.checked});
 
 /* ---------- computer nella rete ---------- */
 function renderNet(s){
@@ -1858,7 +1920,9 @@ class UIHandler(BaseHTTPRequestHandler):
                                                "active": tr_list(), "ip": local_ip(),
                                                "host": socket.gethostname(), "port": cfg["port"],
                                                "can_reveal": IS_MAC, "peers": peers_list(cfg),
-                                               "lang": LANG, "lang_setting": cfg.get("lang", "auto")}))
+                                               "lang": LANG, "lang_setting": cfg.get("lang", "auto"),
+                                               "version": VERSION, "update": update_state(),
+                                               "auto_update": cfg.get("auto_update", True) is not False}))
         if path == "/api/config":
             return self._send(200, json.dumps({"configured": is_configured(cfg), "peer": cfg.get("peer", ""),
                                                "port": int(cfg["port"]), "inbox": cfg["inbox"],
@@ -1884,6 +1948,28 @@ class UIHandler(BaseHTTPRequestHandler):
                 return self._send(400, json.dumps({"error": tr("richiesta non valida")}))
             ok, res = apply_config(cfg, body, ui_port=self.server.server_address[1])
             return self._send(200 if ok else 400, json.dumps(res))
+        if path == "/api/update_check":
+            return self._send(200, json.dumps(check_update()))
+        if path == "/api/update_install":
+            if UPDATE["status"] != "available" or not can_self_update():
+                return self._send(409, json.dumps({"error": tr("Nessun aggiornamento da installare")}))
+            threading.Thread(target=install_update, daemon=True).start()
+            return self._send(200, "{}")
+        if path == "/api/open_release":
+            webbrowser.open(UPDATE["url"])  # sempre e solo la pagina delle Release di TrayDrop
+            return self._send(200, "{}")
+        if path == "/api/update_auto":
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+                on = bool(json.loads(self.rfile.read(n) or b"{}").get("on", True)) if 0 < n < 4096 else True
+            except (ValueError, AttributeError):
+                on = True
+            cfg["auto_update"] = on
+            try:
+                save_cfg(cfg)
+            except OSError:
+                pass
+            return self._send(200, json.dumps({"auto_update": on}))
         if path == "/api/lang":
             try:
                 n = int(self.headers.get("Content-Length", "0"))
@@ -1994,6 +2080,8 @@ def start_ui_server(cfg):
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     threading.Thread(target=_ping_loop, args=(cfg,), daemon=True).start()
     threading.Thread(target=_scan_loop, args=(cfg,), daemon=True).start()
+    threading.Thread(target=_update_loop, args=(cfg,), daemon=True).start()
+    announce_if_updated()
     return srv, url
 
 
@@ -2063,6 +2151,257 @@ def run_ui(cfg):
         run_menubar(cfg)
     else:
         run_tray(cfg)
+
+
+# --------------------------------------------------------------- aggiornamenti
+# TrayDrop chiede a GitHub l'ultima Release; se e' piu' nuova scarica il file giusto per
+# sistema e processore, ne verifica lo SHA-256, sostituisce l'app e la riavvia.
+# Solo le versioni compilate (.app, .exe, binario Linux) si aggiornano da sole; con lo
+# script Python il pulsante apre la pagina della Release.
+REPO = "marcogambetta/traydrop"
+UPDATE_API = os.environ.get("TRAYDROP_UPDATE_URL") or f"https://api.github.com/repos/{REPO}/releases/latest"
+UPDATE = {"status": "idle", "version": "", "url": f"https://github.com/{REPO}/releases",
+          "notes": "", "asset": None, "progress": 0.0, "error": "", "checked": 0.0}
+_update_lock = threading.Lock()
+_notified_version = [""]
+RUN_MODE = ["tray"]  # comando con cui riavviare dopo l'aggiornamento (menubar / tray / gui)
+
+
+def parse_version(v):
+    v = str(v).strip().lstrip("vV").split("-")[0].split("+")[0]
+    try:
+        return tuple(int(x) for x in v.split("."))
+    except ValueError:
+        return ()
+
+
+def machine_arch():
+    if IS_MAC:  # sotto Rosetta platform.machine() dice x86_64 anche su Apple Silicon
+        try:
+            r = _run(["sysctl", "-n", "hw.optional.arm64"], capture_output=True, text=True, timeout=5)
+            if r.stdout.strip() == "1":
+                return "arm64"
+        except Exception:
+            pass
+    return "arm64" if platform.machine().lower() in ("arm64", "aarch64", "armv8l") else "x86_64"
+
+
+def asset_name():
+    """Nome del file della Release adatto a questo computer."""
+    arm = machine_arch() == "arm64"
+    if IS_MAC:
+        return "TrayDrop-macOS-AppleSilicon.dmg" if arm else "TrayDrop-macOS-Intel.dmg"
+    if IS_WIN:
+        return "TrayDrop-Windows.exe"
+    return "TrayDrop-Linux-arm64.tar.gz" if arm else "TrayDrop-Linux-x86_64.tar.gz"
+
+
+def install_target():
+    """Cosa sostituire: la .app (Mac), l'exe (Windows), il binario (Linux). None se script."""
+    if not FROZEN:
+        return None
+    exe = Path(sys.executable).resolve()
+    if IS_MAC:
+        return next((p for p in exe.parents if p.suffix == ".app"), None)
+    return exe
+
+
+def can_self_update():
+    t = install_target()
+    return t is not None and os.access(t.parent, os.W_OK)
+
+
+def _http_get(url, timeout=20):
+    from urllib.request import Request, urlopen
+    return urlopen(Request(url, headers={"User-Agent": f"TrayDrop/{VERSION}",
+                                         "Accept": "application/vnd.github+json"}), timeout=timeout)
+
+
+def update_state():
+    u = dict(UPDATE)
+    u["can_install"] = can_self_update()
+    u.pop("asset", None)
+    return u
+
+
+def check_update(notify_user=False):
+    """Chiede a GitHub l'ultima Release. Ritorna lo stato (vedi UPDATE)."""
+    with _update_lock:
+        if UPDATE["status"] in ("downloading", "installing"):
+            return update_state()
+        try:
+            with _http_get(UPDATE_API) as r:
+                rel = json.loads(r.read())
+        except Exception as e:
+            UPDATE.update(status="error", error=tr("Controllo aggiornamenti non riuscito: {err}", err=e),
+                          checked=time.time())
+            return update_state()
+        tag = str(rel.get("tag_name", ""))
+        want = asset_name()
+        asset = next(({"name": a["name"], "url": a["browser_download_url"], "size": a.get("size") or 0,
+                       "digest": a.get("digest") or ""}
+                      for a in rel.get("assets", []) if a.get("name") == want), None)
+        newer = parse_version(tag) > parse_version(VERSION)
+        UPDATE.update(status="available" if newer else "uptodate", version=tag.lstrip("vV") or VERSION,
+                      url=rel.get("html_url") or UPDATE["url"], notes=(rel.get("body") or "")[:3000],
+                      asset=asset if newer else None, error="", progress=0.0, checked=time.time())
+    if newer and notify_user and _notified_version[0] != UPDATE["version"]:
+        _notified_version[0] = UPDATE["version"]
+        notify("TrayDrop", tr("È disponibile TrayDrop {v}: aggiorna dal menu ⇄ o dalla finestra", v=UPDATE["version"]))
+    return update_state()
+
+
+def _update_loop(cfg):
+    time.sleep(20)
+    while True:
+        if cfg.get("auto_update", True) and UPDATE["status"] not in ("downloading", "installing"):
+            check_update(notify_user=True)
+        time.sleep(12 * 3600)
+
+
+def _download_update():
+    a = UPDATE["asset"]
+    d = Path(tempfile.mkdtemp(prefix="traydrop-update-"))
+    dst, h, done = d / a["name"], hashlib.sha256(), 0
+    with _http_get(a["url"], timeout=60) as r, open(dst, "wb") as f:
+        total = int(r.headers.get("Content-Length") or a.get("size") or 0)
+        while True:
+            b = r.read(CHUNK)
+            if not b:
+                break
+            f.write(b); h.update(b); done += len(b)
+            UPDATE["progress"] = done / total if total else 0.0
+    dig = a.get("digest", "")
+    if dig.startswith("sha256:") and dig[7:].lower() != h.hexdigest():
+        raise ValueError(tr("file scaricato corrotto (checksum diverso)"))
+    return dst
+
+
+def _spawn_helper(text):
+    """Script che aspetta la chiusura di TrayDrop, sostituisce l'app e la riavvia."""
+    d = Path(tempfile.mkdtemp(prefix="traydrop-update-"))
+    if IS_WIN:
+        f = d / "update.cmd"
+        f.write_text(text, encoding="utf-8", newline="\r\n")
+        subprocess.Popen(["cmd", "/c", str(f)], creationflags=0x08000000 | 0x00000200, close_fds=True)  # no finestra
+    else:
+        f = d / "update.sh"
+        f.write_text(text, encoding="utf-8")
+        f.chmod(0o755)
+        subprocess.Popen(["/bin/bash", str(f)], start_new_session=True, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _helper_unix(old, new, exe, mode, version):
+    q = shlex.quote
+    bak = str(old) + ".old"
+    return f"""#!/bin/bash
+# aggiornamento di TrayDrop: aspetta la chiusura, sostituisce, riavvia
+for _ in $(seq 1 600); do kill -0 {os.getpid()} 2>/dev/null || break; sleep 0.2; done
+rm -rf {q(bak)}
+mv {q(str(old))} {q(bak)} || exit 1
+if mv {q(str(new))} {q(str(old))}; then rm -rf {q(bak)}; else mv {q(bak)} {q(str(old))}; fi
+TRAYDROP_UPDATED={q(version)} nohup {q(str(exe))} {q(mode)} >/dev/null 2>&1 &
+rm -f "$0"
+"""
+
+
+def _helper_win(old, new, mode, version):
+    return f"""@echo off
+chcp 65001 >nul
+rem aggiornamento di TrayDrop: aspetta la chiusura, sostituisce, riavvia
+set n=0
+:retry
+move /Y "{new}" "{old}" >nul 2>&1 && goto ok
+set /a n+=1
+if %n% GEQ 120 goto done
+ping -n 2 127.0.0.1 >nul
+goto retry
+:ok
+set "TRAYDROP_UPDATED={version}"
+start "" "{old}" {mode}
+:done
+(goto) 2>nul & del "%~f0"
+"""
+
+
+def _prepare_install(pkg):
+    """Prepara la nuova versione accanto a quella in uso e ritorna lo script di sostituzione."""
+    target, mode, v = install_target(), RUN_MODE[0], UPDATE["version"]
+    if IS_MAC:
+        new = target.with_name(target.name + ".new")
+        shutil.rmtree(new, ignore_errors=True)
+        mnt = Path(tempfile.mkdtemp(prefix="traydrop-dmg-"))
+        _run(["hdiutil", "attach", "-nobrowse", "-readonly", "-mountpoint", str(mnt), str(pkg)],
+             capture_output=True, check=True, timeout=180)
+        try:
+            src = next(mnt.glob("*.app"))
+            _run(["ditto", str(src), str(new)], capture_output=True, check=True, timeout=300)
+        finally:
+            _run(["hdiutil", "detach", str(mnt), "-quiet"], capture_output=True, timeout=60)
+        _run(["xattr", "-dr", "com.apple.quarantine", str(new)], capture_output=True)
+        exe = target / Path(sys.executable).resolve().relative_to(target)
+        return _helper_unix(target, new, exe, mode, v)
+    if IS_WIN:
+        new = target.with_name(target.stem + ".new" + target.suffix)
+        shutil.copyfile(pkg, new)
+        return _helper_win(target, new, mode, v)
+    import tarfile
+    new = target.with_name("." + target.name + ".new")
+    with tarfile.open(pkg) as t:
+        m = next(x for x in t.getmembers() if x.isfile() and Path(x.name).name == "TrayDrop")
+        with t.extractfile(m) as src, open(new, "wb") as out:
+            shutil.copyfileobj(src, out)
+    new.chmod(0o755)
+    return _helper_unix(target, new, target, mode, v)
+
+
+def install_update():
+    """Scarica, prepara e installa l'aggiornamento; poi chiude TrayDrop (lo script lo riavvia)."""
+    if UPDATE["status"] != "available" or not UPDATE.get("asset") or not can_self_update():
+        return
+    try:
+        UPDATE.update(status="downloading", progress=0.0, error="")
+        pkg = _download_update()
+        UPDATE["status"] = "installing"
+        _spawn_helper(_prepare_install(pkg))
+    except Exception as e:
+        UPDATE.update(status="available", error=tr("Aggiornamento non riuscito: {err}", err=e))
+        notify_err(UPDATE["error"])
+        return
+    threading.Timer(1.5, lambda: os._exit(0)).start()
+
+
+def update_action(cfg, ui_url=None):
+    """Voce di menu: aggiorna se c'e' una versione nuova, altrimenti controlla."""
+    if UPDATE["status"] == "available":
+        if can_self_update():
+            threading.Thread(target=install_update, daemon=True).start()
+        else:
+            webbrowser.open(UPDATE["url"])
+        return
+    st = check_update()
+    if st["status"] == "available":
+        notify("TrayDrop", tr("È disponibile TrayDrop {v}: aggiorna dal menu ⇄ o dalla finestra", v=st["version"]))
+    elif st["status"] == "uptodate":
+        notify("TrayDrop", tr("Hai già l'ultima versione ({v})", v=VERSION))
+    else:
+        notify_err(st["error"])
+
+
+def update_menu_label():
+    if UPDATE["status"] == "available":
+        return tr("Aggiorna a TrayDrop {v}…", v=UPDATE["version"])
+    if UPDATE["status"] in ("downloading", "installing"):
+        return tr("Aggiornamento in corso…")
+    return tr("Controlla aggiornamenti…")
+
+
+def announce_if_updated():
+    """Dopo un aggiornamento: notifica la nuova versione (una volta)."""
+    v = os.environ.pop("TRAYDROP_UPDATED", "")
+    if v:
+        threading.Timer(2.0, notify, args=("TrayDrop", tr("TrayDrop aggiornato alla versione {v}", v=v))).start()
 
 
 MAC_AGENT = Path.home() / "Library/LaunchAgents/com.marco.traydrop.plist"
@@ -2591,6 +2930,47 @@ TRANSLATIONS = {
     "richiesta non valida": ("invalid request", "requête non valide", "solicitud no válida"),
     "Autenticazione negata": ("Authentication denied", "Authentification refusée", "Autenticación denegada"),
     "upload interrotto": ("upload interrupted", "envoi interrompu", "subida interrumpida"),
+    # ---- aggiornamenti
+    "Aggiorna a TrayDrop {v}…": ("Update to TrayDrop {v}…", "Mettre à jour vers TrayDrop {v}…", "Actualizar a TrayDrop {v}…"),
+    "Aggiorna e riavvia": ("Update and restart", "Mettre à jour et redémarrer", "Actualizar y reiniciar"),
+    "Aggiornamenti": ("Updates", "Mises à jour", "Actualizaciones"),
+    "Aggiornamento in corso…": ("Updating…", "Mise à jour en cours…", "Actualizando…"),
+    "Aggiornamento non riuscito: {err}": ("Update failed: {err}", "Échec de la mise à jour : {err}", "La actualización ha fallado: {err}"),
+    "Controlla aggiornamenti": ("Check for updates", "Rechercher des mises à jour", "Buscar actualizaciones"),
+    "Controlla aggiornamenti…": ("Check for updates…", "Rechercher des mises à jour…", "Buscar actualizaciones…"),
+    "Controllo aggiornamenti non riuscito: {err}": ("Update check failed: {err}",
+                                                    "Échec de la recherche de mises à jour : {err}",
+                                                    "No se han podido buscar actualizaciones: {err}"),
+    "Controllo…": ("Checking…", "Vérification…", "Comprobando…"),
+    "Hai già l'ultima versione ({v})": ("You already have the latest version ({v})",
+                                        "Vous avez déjà la dernière version ({v})",
+                                        "Ya tienes la última versión ({v})"),
+    "Hai già l’ultima versione ({v})": ("You already have the latest version ({v})",
+                                        "Vous avez déjà la dernière version ({v})",
+                                        "Ya tienes la última versión ({v})"),
+    "Installo e riavvio…": ("Installing and restarting…", "Installation et redémarrage…", "Instalando y reiniciando…"),
+    "Nessun aggiornamento da installare": ("No update to install", "Aucune mise à jour à installer", "No hay actualizaciones para instalar"),
+    "Non chiudere TrayDrop.": ("Don't quit TrayDrop.", "Ne quittez pas TrayDrop.", "No cierres TrayDrop."),
+    "Novità": ("What's new", "Nouveautés", "Novedades"),
+    "Scarica": ("Download", "Télécharger", "Descargar"),
+    "Scaricala dalla pagina della Release.": ("Download it from the Release page.", "Téléchargez-la depuis la page de la version.",
+                                              "Descárgala desde la página de la versión."),
+    "Scarico l’aggiornamento… {p}%": ("Downloading the update… {p}%", "Téléchargement de la mise à jour… {p} %",
+                                      "Descargando la actualización… {p}%"),
+    "Si installa e riavvia da solo.": ("It installs and restarts by itself.", "Elle s'installe et redémarre toute seule.",
+                                       "Se instala y se reinicia sola."),
+    "TrayDrop aggiornato alla versione {v}": ("TrayDrop updated to version {v}", "TrayDrop mis à jour vers la version {v}",
+                                              "TrayDrop actualizado a la versión {v}"),
+    "Versione": ("Version", "Version", "Versión"),
+    "controlla ogni giorno": ("check every day", "vérifier chaque jour", "comprobar cada día"),
+    "file scaricato corrotto (checksum diverso)": ("downloaded file is corrupted (checksum mismatch)",
+                                                   "fichier téléchargé corrompu (somme de contrôle différente)",
+                                                   "archivo descargado dañado (suma de verificación distinta)"),
+    "È disponibile TrayDrop {v}": ("TrayDrop {v} is available", "TrayDrop {v} est disponible", "TrayDrop {v} está disponible"),
+    "È disponibile TrayDrop {v}: aggiorna dal menu ⇄ o dalla finestra":
+        ("TrayDrop {v} is available: update from the ⇄ menu or the window",
+         "TrayDrop {v} est disponible : mettez à jour depuis le menu ⇄ ou la fenêtre",
+         "TrayDrop {v} está disponible: actualiza desde el menú ⇄ o la ventana"),
     # ---- Linux
     "Icona non disponibile ({err}): uso la finestra.": ("Tray icon not available ({err}): using the window.",
                                                         "Icône indisponible ({err}) : utilisation de la fenêtre.",
@@ -2925,7 +3305,7 @@ def main():
     s = sub.add_parser("send"); s.add_argument("files", nargs="+")
     p = sub.add_parser("pick"); p.add_argument("--dir", action="store_true")
     for c in ("menubar", "tray", "gui", "tk", "serve", "ping", "clip", "install-login", "install-shortcut",
-              "install-app"):
+              "install-app", "version", "check-update"):
         sub.add_parser(c)
     a = ap.parse_args()
     try:
@@ -2940,6 +3320,7 @@ def main():
         global OPEN_WINDOW_AT_START
         OPEN_WINDOW_AT_START = IS_LINUX
 
+    RUN_MODE[0] = a.cmd if a.cmd in ("menubar", "tray", "gui") else ("menubar" if IS_MAC else "tray")
     if a.cmd == "init":
         HOME.mkdir(parents=True, exist_ok=True)
         token = a.token or secrets.token_urlsafe(24)
@@ -2956,6 +3337,15 @@ def main():
         return install_shortcut()
     if a.cmd == "install-app":
         return install_app()
+    if a.cmd == "version":
+        return print(f"TrayDrop {VERSION} ({asset_name()})")
+    if a.cmd == "check-update":
+        st = check_update()
+        if st["status"] == "error":
+            sys.exit(st["error"])
+        print(tr("È disponibile TrayDrop {v}: aggiorna dal menu ⇄ o dalla finestra", v=st["version"])
+              if st["status"] == "available" else tr("Hai già l'ultima versione ({v})", v=VERSION))
+        return
     if a.cmd == "pick":
         return pick_cmd(a.dir)
     cfg = load_cfg(allow_missing=a.cmd in ("menubar", "tray", "gui"))

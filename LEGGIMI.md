@@ -68,6 +68,25 @@ Da creare UNA volta su un Mac, dalla cartella TRAYDROP:
 Con piu' di due computer: il "peer" e' un solo destinatario; per ora l'app parla
 con una coppia. (Estendibile a una lista di destinatari.)
 
+## Aggiornamenti
+- TrayDrop controlla da solo (all'avvio e ogni 12 ore) se su GitHub c'e' una Release piu' nuova.
+  Se c'e': notifica, barra "E' disponibile TrayDrop X" nella finestra e voce "Aggiorna a…" nel menu ⇄.
+- "Aggiorna e riavvia": scarica il file giusto per il tuo sistema e processore (Mac Apple
+  Silicon/Intel, Windows, Linux x86_64/arm64), ne verifica lo SHA-256, sostituisce l'app e la
+  riavvia. La finestra aperta si ricarica da sola sulla versione nuova.
+- Si aggiornano da sole le versioni compilate (DMG, exe, binario Linux) se la loro cartella e'
+  scrivibile. Con lo script (python traydrop.py) il pulsante apre la pagina della Release.
+- Controllo manuale: finestra > Collegamento > Versione > "Controlla aggiornamenti",
+  oppure menu ⇄ > "Controlla aggiornamenti…", oppure:  python traydrop.py check-update
+- Per non controllare in automatico: togli la spunta "controlla ogni giorno".
+  Il controllo e' una richiesta a api.github.com: non invia nulla di tuo.
+- Versione installata:  TrayDrop version  (oppure riga "Versione" nella finestra).
+
+## Pubblicare una nuova versione
+    git tag v1.1.0 && git push origin v1.1.0      (con il token, come per main)
+  GitHub Actions scrive 1.1.0 dentro l'app, compila Mac/Windows/Linux, li prova e crea la
+  Release: da quel momento tutti i TrayDrop installati propongono l'aggiornamento.
+
 ## Lingua
 - TrayDrop parla italiano, inglese, francese e spagnolo. Di default usa la lingua del sistema
   (se non e' tra queste: inglese). Per cambiarla: finestra > pannello Collegamento > "Lingua".
