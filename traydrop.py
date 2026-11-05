@@ -139,7 +139,9 @@ def sign(token, msg):
 
 IS_MAC = sys.platform == "darwin"
 IS_WIN = sys.platform.startswith("win")
+IS_LINUX = not IS_MAC and not IS_WIN
 _tray = None  # icona pystray (Windows/Linux), impostata da run_tray
+OPEN_WINDOW_AT_START = False  # Linux, doppio clic: apre anche la finestra (non tutti i desktop mostrano le icone)
 
 
 FROZEN = getattr(sys, "frozen", False)  # True dentro un .exe / .app creato con PyInstaller
@@ -1269,7 +1271,16 @@ def run_tray(cfg):
         pystray.MenuItem(lambda item: tr("Esci"), lambda icon: icon.stop()),
     )
     _tray = pystray.Icon("traydrop", img, "TrayDrop", menu)
-    _tray.run()
+    if OPEN_WINDOW_AT_START and is_configured(cfg):
+        threading.Timer(1.0, open_window, args=(ui_url,)).start()
+    try:
+        _tray.run()
+    except Exception as e:  # es. desktop Linux senza area di notifica: si usa la finestra
+        _tray = None
+        print(tr("Icona non disponibile ({err}): uso la finestra.", err=e))
+        open_window(ui_url)
+        while True:  # ricevitore e finestra continuano a funzionare
+            time.sleep(3600)
 
 
 def run_tk(cfg):
@@ -2126,9 +2137,37 @@ def _make_icns(dst):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+LINUX_DESKTOP = Path.home() / ".local/share/applications/traydrop.desktop"
+LINUX_ICON = Path.home() / ".local/share/icons/hicolor/512x512/apps/traydrop.png"
+
+
+def install_app_linux():
+    """Linux: voce 'TrayDrop' nel menu delle applicazioni (GNOME, KDE, XFCE...) con la sua icona."""
+    import base64
+    LINUX_ICON.parent.mkdir(parents=True, exist_ok=True)
+    LINUX_ICON.write_bytes(base64.b64decode(ICON_PNG_B64))
+    exe = " ".join(shlex.quote(c) for c in self_cmd("tray"))
+    LINUX_DESKTOP.parent.mkdir(parents=True, exist_ok=True)
+    LINUX_DESKTOP.write_text(
+        "[Desktop Entry]\nType=Application\nName=TrayDrop\n"
+        f"Comment={tr('Invia file e appunti tra i tuoi computer')}\n"
+        f"Exec={exe}\nIcon=traydrop\nTerminal=false\nCategories=Network;FileTransfer;Utility;\n",
+        encoding="utf-8")
+    LINUX_DESKTOP.chmod(0o755)
+    for cmd in (["update-desktop-database", str(LINUX_DESKTOP.parent)],
+                ["gtk-update-icon-cache", "-q", str(LINUX_ICON.parents[2])]):
+        if shutil.which(cmd[0]):
+            _run(cmd, capture_output=True)
+    print(tr("Aggiunto al menu delle applicazioni: {path}", path=LINUX_DESKTOP))
+    if FROZEN:
+        print(tr("Lascia l'eseguibile dove si trova (consigliato: ~/.local/bin): il menu punta lì."))
+
+
 def install_app():
     """macOS: crea ~/Applications/TrayDrop.app (doppio clic, Launchpad, Spotlight, Dock).
     L'app contiene una COPIA di traydrop.py: dopo un aggiornamento rilancia install-app."""
+    if IS_LINUX:
+        return install_app_linux()
     if not IS_MAC:
         print(tr("install-app serve solo su macOS. Su Windows: install-login / install-shortcut,\n"
                  "oppure crea TrayDrop.exe con PyInstaller (vedi LEGGIMI.md)."))
@@ -2552,6 +2591,20 @@ TRANSLATIONS = {
     "richiesta non valida": ("invalid request", "requête non valide", "solicitud no válida"),
     "Autenticazione negata": ("Authentication denied", "Authentification refusée", "Autenticación denegada"),
     "upload interrotto": ("upload interrupted", "envoi interrompu", "subida interrumpida"),
+    # ---- Linux
+    "Icona non disponibile ({err}): uso la finestra.": ("Tray icon not available ({err}): using the window.",
+                                                        "Icône indisponible ({err}) : utilisation de la fenêtre.",
+                                                        "Icono no disponible ({err}): uso la ventana."),
+    "Invia file e appunti tra i tuoi computer": ("Send files and clipboard between your computers",
+                                                 "Envoyez fichiers et presse-papiers entre vos ordinateurs",
+                                                 "Envía archivos y portapapeles entre tus ordenadores"),
+    "Aggiunto al menu delle applicazioni: {path}": ("Added to the applications menu: {path}",
+                                                    "Ajouté au menu des applications : {path}",
+                                                    "Añadido al menú de aplicaciones: {path}"),
+    "Lascia l'eseguibile dove si trova (consigliato: ~/.local/bin): il menu punta lì.":
+        ("Keep the executable where it is (recommended: ~/.local/bin): the menu points there.",
+         "Laissez l'exécutable à son emplacement (conseillé : ~/.local/bin) : le menu pointe vers lui.",
+         "Deja el ejecutable donde está (recomendado: ~/.local/bin): el menú apunta ahí."),
 }
 
 
@@ -2884,6 +2937,8 @@ def main():
             ap.print_help()
             sys.exit(2)
         a.cmd = "menubar" if IS_MAC else "tray"  # doppio clic sull'eseguibile = icona
+        global OPEN_WINDOW_AT_START
+        OPEN_WINDOW_AT_START = IS_LINUX
 
     if a.cmd == "init":
         HOME.mkdir(parents=True, exist_ok=True)

@@ -1,13 +1,14 @@
 # TrayDrop
 
 Send files, folders and clipboard contents (text and images) between your own computers on the
-same local network, with one click from the ⇄ icon in the menu bar (Mac) or system tray (Windows).
+same local network, with one click from the ⇄ icon in the menu bar (Mac) or system tray (Windows, Linux).
 Available in English, Italiano, Français and Español.
 
 ## Download
 
 - **Stable version**: [Releases](../../releases) → `TrayDrop-macOS-AppleSilicon.dmg`,
-  `TrayDrop-macOS-Intel.dmg` or `TrayDrop-Windows.exe`.
+  `TrayDrop-macOS-Intel.dmg`, `TrayDrop-Windows.exe`, `TrayDrop-Linux-x86_64.tar.gz`
+  or `TrayDrop-Linux-arm64.tar.gz`.
 - **Latest build**: [Actions](../../actions/workflows/build.yml) → most recent run with a green
   check mark → **Artifacts** at the bottom.
 
@@ -15,6 +16,14 @@ Available in English, Italiano, Français and Español.
 time, open it, then go to System Settings → Privacy & Security → “Open Anyway”
 (or run `xattr -dr com.apple.quarantine /Applications/TrayDrop.app`).
 **Windows**: run `TrayDrop-Windows.exe`; if SmartScreen warns you: “More info” → “Run anyway”.
+**Linux**: extract it and add it to the applications menu:
+
+    mkdir -p ~/.local/bin && tar -xzf TrayDrop-Linux-x86_64.tar.gz -C ~/.local/bin
+    ~/.local/bin/TrayDrop install-app      # adds TrayDrop to the applications menu
+    ~/.local/bin/TrayDrop install-login    # optional: start at login
+
+For the clipboard install `wl-clipboard` (Wayland) or `xclip` (X11). Desktops without a system
+tray (e.g. stock GNOME) show the TrayDrop window instead of the ⇄ icon.
 
 On first launch the **Connect your computers** window opens: “Search” finds the other computer;
 on one of the two choose “Generate new” token, on the other “Paste”.

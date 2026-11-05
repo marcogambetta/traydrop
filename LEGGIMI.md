@@ -111,6 +111,17 @@ con una coppia. (Estendibile a una lista di destinatari.)
 - Firma HMAC col token + checksum SHA-256. Il contenuto viaggia in chiaro sulla LAN.
 - Vuoi un .exe / .app da doppio clic senza installare Python? Vedi "Windows: creare TrayDrop.exe".
 
+## Linux
+- Versione compilata: TrayDrop-Linux-x86_64.tar.gz (PC) o TrayDrop-Linux-arm64.tar.gz
+  (Raspberry Pi 64 bit, ARM), da Actions > Artifacts o dalle Releases.
+    mkdir -p ~/.local/bin && tar -xzf TrayDrop-Linux-x86_64.tar.gz -C ~/.local/bin
+    ~/.local/bin/TrayDrop install-app      # voce "TrayDrop" nel menu delle applicazioni
+    ~/.local/bin/TrayDrop install-login    # facoltativo: avvio automatico
+- Doppio clic / menu applicazioni: icona ⇄ nell'area di notifica E finestra TrayDrop.
+  Sui desktop senza area di notifica (GNOME di serie) resta solo la finestra.
+- Appunti: serve wl-clipboard (Wayland) o xclip (X11):  sudo apt install wl-clipboard xclip
+- Compilato su Ubuntu 22.04: funziona sulle distribuzioni con glibc 2.35 o piu' recente.
+
 ## Windows
 - Installa:  pip install pystray pillow   (e, se vuoi la finestra nativa, pywebview)
 - Avvio:     python traydrop.py tray   (icona nell'area di notifica; clic = finestra)
