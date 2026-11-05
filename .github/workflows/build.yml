@@ -30,6 +30,8 @@ jobs:
           pip install -q pyflakes
           python -m pyflakes traydrop.py
           bash -n crea_dmg.sh
+      - name: Controllo traduzioni (it, en, fr, es)
+        run: python tools/check_i18n.py
 
   macos:
     name: macOS ${{ matrix.arch }}
